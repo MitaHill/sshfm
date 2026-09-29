@@ -137,19 +137,21 @@ static unsigned long long get_version()
 	return g_version;
 }
 
-/* A file being edited by one session cannot be opened by another. */
+/* A file being edited by one session cannot be opened by another.  Each lock
+ * remembers the owning session, so a session that ends can always release
+ * every lock it holds, even if its path was rewritten by a move in between. */
 static std::mutex g_lock_mtx;
-static std::set<std::string> g_filelocks;
+static std::map<std::string, unsigned long long> g_filelocks;   /* path -> sid */
 /* bumped whenever a lock is taken or released, so every session can
  * repaint the reverse-video state of locked names */
 static std::atomic<unsigned long long> g_lock_epoch{0};
 
-static bool filelock_acquire(const std::string &rel)
+static bool filelock_acquire(const std::string &rel, unsigned long long owner)
 {
 	std::lock_guard<std::mutex> lk(g_lock_mtx);
 	if (g_filelocks.count(rel))
 		return false;
-	g_filelocks.insert(rel);
+	g_filelocks[rel] = owner;
 	g_lock_epoch++;
 	return true;
 }
@@ -158,6 +160,19 @@ static void filelock_release(const std::string &rel)
 	std::lock_guard<std::mutex> lk(g_lock_mtx);
 	if (g_filelocks.erase(rel))
 		g_lock_epoch++;
+}
+/* release every lock owned by `owner` (session exit) */
+static void filelock_release_owner(unsigned long long owner)
+{
+	std::lock_guard<std::mutex> lk(g_lock_mtx);
+	for (auto it = g_filelocks.begin(); it != g_filelocks.end();) {
+		if (it->second == owner) {
+			it = g_filelocks.erase(it);
+			g_lock_epoch++;
+		} else {
+			++it;
+		}
+	}
 }
 static bool filelock_held(const std::string &rel)
 {
@@ -383,7 +398,7 @@ static int cluster_width(const std::string &s, size_t i, size_t end)
 	{
 		int nb0;
 		unsigned int c0 = u8decode(s, i, &nb0);
-		if (is_ctrl_byte((unsigned char)c0))
+		if (c0 < 0x80 && is_ctrl_byte((unsigned char)c0))
 			return (int)ctrl_text((unsigned char)c0).size();
 	}
 	bool emoji = false, zwj = false;
@@ -922,12 +937,25 @@ public:
 		m.editor_ip = ip;
 		m.mtime_ts = (long long)time(nullptr);
 		write_meta(to_rel, m);
-		/* a locked file keeps its lock under the new path */
+		/* every lock at the moved path OR under it follows the move: the
+		 * editing sessions rewrite their own path via the path event, so
+		 * the lock they will later release has to match */
 		{
 			std::lock_guard<std::mutex> lk(g_lock_mtx);
-			if (g_filelocks.count(from_rel)) {
-				g_filelocks.erase(from_rel);
-				g_filelocks.insert(to_rel);
+			std::vector<std::pair<std::string, std::string>> mv;
+			for (auto it = g_filelocks.begin(); it != g_filelocks.end(); ++it) {
+				const std::string &p = it->first;
+				bool under = p == from_rel ||
+				    (p.size() > from_rel.size() &&
+				     p.compare(0, from_rel.size(), from_rel) == 0 &&
+				     p[from_rel.size()] == '/');
+				if (under)
+					mv.push_back({p, to_rel + p.substr(from_rel.size())});
+			}
+			for (auto &m : mv) {
+				unsigned long long owner = g_filelocks[m.first];
+				g_filelocks.erase(m.first);
+				g_filelocks[m.second] = owner;
 				g_lock_epoch++;
 			}
 		}
@@ -2913,7 +2941,7 @@ void UI::handle_list(const KeyEvent &ev)
 			refresh(false);
 		} else {
 			edit_rel_ = cwd_.empty() ? e.name : cwd_ + "/" + e.name;
-			if (!filelock_acquire(edit_rel_)) {
+			if (!filelock_acquire(edit_rel_, sid_)) {
 				status_ = "file is being edited by someone else";
 			} else {
 				edit_lock_ = edit_rel_;
@@ -3611,11 +3639,10 @@ void UI::run(ssh_channel ch, int cols, int rows)
 		}
 	} catch (int) {
 	}
-	/* release any editor lock this connection still holds */
-	if (!edit_lock_.empty()) {
-		filelock_release(edit_lock_);
-		edit_lock_.clear();
-	}
+	/* release every editor lock this session owns (its path may have been
+	 * rewritten by a move while it held the lock) */
+	filelock_release_owner(sid_);
+	edit_lock_.clear();
 	{
 		std::lock_guard<std::mutex> lk(g_sess_mtx);
 		g_sessions.erase(sid_);
@@ -3913,6 +3940,13 @@ int main(int argc, char **argv)
 	fprintf(stderr, "sshfm: root=%s port=%d tz=%+d auth=%d captcha=%d%s\n",
         g_root.c_str(), port, g_tz_offset, g_auth_timeout, g_captcha_timeout,
         g_captcha_weak ? "L" : "");
+
+	/* libssh must be initialised once before use; this also installs the
+	 * thread callbacks that make one-session-per-thread safe */
+	if (ssh_init() != 0) {
+		fprintf(stderr, "sshfm: libssh initialisation failed\n");
+		return 1;
+	}
 
 	ssh_bind bind = ssh_bind_new();
 	ssh_bind_options_set(bind, SSH_BIND_OPTIONS_BINDADDR, "0.0.0.0");
