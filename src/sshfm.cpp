@@ -597,21 +597,24 @@ static std::string sfmt(const char *fmt, ...)
 	return std::string(buf);
 }
 
-/* file size: use the smallest unit whose text fits the cell width */
-static std::string fmt_size(long long n, int w)
+/* Binary units, with one decimal place. */
+static std::string fmt_size(long long n)
 {
 	char buf[64];
-	snprintf(buf, sizeof buf, "%lld", n);
-	if ((int)strlen(buf) <= w)
+	if (n < 1024) {
+		snprintf(buf, sizeof buf, "%lldB", n);
 		return std::string(buf);
-	double v = (double)n;
-	static const char *u = "KMGT";
-	for (int i = 0; i < 4; i++) {
-		v /= 1024.0;
-		snprintf(buf, sizeof buf, "%.0f%c", v, u[i]);
-		if ((int)strlen(buf) <= w)
-			return std::string(buf);
 	}
+	double v = (double)n;
+	static const char *u[] = {"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"};
+	int unit = 0;
+	while (v >= 1024.0 && unit < 6) {
+		v /= 1024.0;
+		unit++;
+	}
+	/* Avoid rounding a value just below the next unit to 1024.0. */
+	if (v >= 1023.95 && unit < 6) { v /= 1024.0; unit++; }
+	snprintf(buf, sizeof buf, "%.1f%s", v, u[unit]);
 	return std::string(buf);
 }
 
@@ -669,7 +672,7 @@ static std::string fmt_time(long long t)
 	struct tm tmv;
 	gmtime_r(&tt, &tmv);
 	char b[32];
-	strftime(b, sizeof(b), "%Y%m%d%H%M", &tmv);
+	strftime(b, sizeof(b), "%Y-%m-%d %H:%M", &tmv);
 	return b;
 }
 
@@ -1341,7 +1344,7 @@ static std::vector<std::string> make_captcha_art(const std::string &code,
 /* ------------------------------------------------------------------ */
 
 /* minimum widths of the entry cells: name size created edited creator editor */
-static const int CELL_MIN[6] = {18, 6, 12, 12, 15, 15};
+static const int CELL_MIN[6] = {18, 9, 16, 16, 15, 15};
 
 enum class Key {
 	None, Resize, Tick, Update, Redraw, Up, Down, Left, Right, Home, End, PageUp, PageDown,
@@ -2059,7 +2062,7 @@ void UI::draw_list(std::string &s)
 		cell_widths(elines[0], w0);
 		std::string cell[6];
 		cell[0] = e.name + (e.isdir ? "/" : "");
-		cell[1] = e.isdir ? "<DIR>" : fmt_size(e.size, w0[1]);
+		cell[1] = e.isdir ? "<DIR>" : fmt_size(e.size);
 		cell[2] = fmt_time(e.meta.creator_ts);
 		cell[3] = fmt_time(e.meta.mtime_ts);
 		cell[4] = e.meta.creator_ip;
