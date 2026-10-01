@@ -1760,11 +1760,10 @@ void UI::process_events()
 	bool editing = (mode_ == EDITOR || base_ == EDITOR) && !edit_rel_.empty();
 	for (auto &e : evs) {
 		if (e.type == 0) {
-			/* moved: rewrite cwd / open editor path (locks are by id, unchanged) */
-			if (!editing && under(cwd_, e.a)) {
+			/* moved: rewrite cwd / open editor path (locks are by id, unchanged).
+			 * keep entries_ so refresh() can merge by id and preserve list state */
+			if (!editing && under(cwd_, e.a))
 				cwd_ = e.b + cwd_.substr(e.a.size());
-				entries_.clear();
-			}
 			if (!edit_rel_.empty() && under(edit_rel_, e.a))
 				edit_rel_ = e.b + edit_rel_.substr(e.a.size());
 		} else if (e.type == 1) {
