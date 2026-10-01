@@ -1782,10 +1782,8 @@ void UI::process_events()
 	if (editing) {
 		size_t p = edit_rel_.rfind('/');
 		std::string parent = (p == std::string::npos) ? std::string() : edit_rel_.substr(0, p);
-		if (cwd_ != parent) {
-			cwd_ = parent;
-			entries_.clear();
-		}
+		if (cwd_ != parent)
+			cwd_ = parent;   /* keep entries_ for refresh() to merge by id on exit */
 	}
 }
 
@@ -2249,14 +2247,14 @@ void UI::draw_editor(std::string &s)
 			continue;
 		}
 		int li = disp[di].first;
-		int off = disp[di].second;
 		const std::vector<std::string> &chunks = editor_wrap_[li];
 		int ci = 0;
-		size_t acc = 0;
-		for (; ci < (int)chunks.size(); ci++) {
-			if ((int)acc == off)
-				break;
-			acc += chunks[ci].size();
+		for (int k = 0; k < (int)disp.size(); k++) {
+			if (disp[k].first == li) {
+				if (k == di)
+					break;
+				ci++;
+			}
 		}
 		std::string chunk = (ci < (int)chunks.size()) ? chunks[ci] : "";
 		std::string num = (ci == 0) ? sfmt("%*d ", numw - 1, li + 1) : std::string(numw, ' ');
@@ -3081,15 +3079,7 @@ void UI::leave_editor()
  * can travel up/down between the reserved end-of-visual-line positions) */
 void UI::editor_remember_goal()
 {
-	int numw = 1;
-	{
-		int n = editor_line_count();
-		int d = 0;
-		while (n > 0) { d++; n /= 10; }
-		numw = std::max(3, d) + 1;
-	}
-	int w = main_cols_ - numw - 1;
-	if (w < 1) w = 1;
+	int w = editor_text_w();
 	int chunk = 0, col = 0;
 	cursor_chunk(lines_[cy_], cx_, w, chunk, col);
 	goal_col_ = col;
@@ -3111,11 +3101,10 @@ void UI::handle_editor(const KeyEvent &ev)
 		bool page = (ev.key == Key::PageUp || ev.key == Key::PageDown);
 		int etop_old = etop_;
 		/* current visual row of the cursor + its column */
+		if (goal_col_ < 0)
+			editor_remember_goal();
+		int col = goal_col_;
 		int d = editor_cursor_display_row();
-		int chunk = 0, col = 0;
-		cursor_chunk(lines_[cy_], cx_, w, chunk, col);
-		if (goal_col_ >= 0)
-			col = goal_col_;   /* vertical moves reuse the remembered column */
 		int nd;
 		if (page) {
 			/* phase 1: scroll the viewport a full page; the cursor has
