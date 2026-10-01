@@ -68,26 +68,6 @@ Override with environment variables:
 SSHFM_WORK=/path/to/cache JOBS=8 ./build.sh
 ```
 
-## GitHub Actions
-
-The `Build` workflow runs on branch pushes, pull requests targeting `main`,
-and manual dispatches. It uses Ubuntu 24.04 to build the bundled dependencies
-and the Linux x86-64 executable, checks that the executable is statically
-linked, and runs `--help` as a smoke test.
-
-Successful runs upload a `sshfm-linux-x86_64` artifact containing
-`sshfm-linux-x86_64.tar.gz`, retained for 14 days. Download the artifact from
-the workflow run, unzip it, then extract the tarball to preserve executable
-permissions:
-
-```bash
-tar -xzf sshfm-linux-x86_64.tar.gz
-./sshfm --help
-```
-
-Failed builds upload available dependency and compiler logs as
-`sshfm-build-logs`, retained for 7 days.
-
 ## Running
 
 ```bash
