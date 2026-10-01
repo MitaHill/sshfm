@@ -137,28 +137,35 @@ static unsigned long long get_version()
 	return g_version;
 }
 
-/* A file being edited by one session cannot be opened by another.  Each lock
- * remembers the owning session, so a session that ends can always release
- * every lock it holds, even if its path was rewritten by a move in between. */
+/* A file being edited by one session cannot be opened by another.  Locks are
+ * keyed by the entry's stable meta id (not path), so renames do not re-key. */
 static std::mutex g_lock_mtx;
-static std::map<std::string, unsigned long long> g_filelocks;   /* path -> sid */
+static std::map<std::string, unsigned long long> g_filelocks;   /* id -> sid */
 /* bumped whenever a lock is taken or released, so every session can
  * repaint the reverse-video state of locked names */
 static std::atomic<unsigned long long> g_lock_epoch{0};
 
-static bool filelock_acquire(const std::string &rel, unsigned long long owner)
+static std::string filelock_entry_id(const std::string &meta_id,
+                                     const std::string &name_fallback)
+{
+	return meta_id.empty() ? name_fallback : meta_id;
+}
+
+static bool filelock_acquire_id(const std::string &id, unsigned long long owner)
 {
 	std::lock_guard<std::mutex> lk(g_lock_mtx);
-	if (g_filelocks.count(rel))
+	if (id.empty() || g_filelocks.count(id))
 		return false;
-	g_filelocks[rel] = owner;
+	g_filelocks[id] = owner;
 	g_lock_epoch++;
 	return true;
 }
-static void filelock_release(const std::string &rel)
+static void filelock_release_id(const std::string &id)
 {
 	std::lock_guard<std::mutex> lk(g_lock_mtx);
-	if (g_filelocks.erase(rel))
+	if (id.empty())
+		return;
+	if (g_filelocks.erase(id))
 		g_lock_epoch++;
 }
 /* release every lock owned by `owner` (session exit) */
@@ -174,10 +181,12 @@ static void filelock_release_owner(unsigned long long owner)
 		}
 	}
 }
-static bool filelock_held(const std::string &rel)
+static bool filelock_held_id(const std::string &id)
 {
+	if (id.empty())
+		return false;
 	std::lock_guard<std::mutex> lk(g_lock_mtx);
-	return g_filelocks.count(rel) > 0;
+	return g_filelocks.count(id) > 0;
 }
 
 /* ---- global path events (rename / delete of folders & files) ---- */
@@ -876,7 +885,10 @@ public:
 	int remove_entry(const std::string &rel, const std::string &ip)
 	{
 		if (!is_dir(rel)) {
-			if (filelock_held(rel))
+			Meta fm = read_meta(rel);
+			size_t bp = rel.rfind('/');
+			std::string bname = (bp == std::string::npos) ? rel : rel.substr(bp + 1);
+			if (filelock_held_id(filelock_entry_id(fm.id, bname)))
 				return -2;              /* a locked file cannot be deleted */
 			if (unlink(abs(rel).c_str()) != 0)
 				return 0;
@@ -902,7 +914,11 @@ private:
 				if (!remove_tree_locked(krel))
 					all = false;
 			} else {
-				if (filelock_held(krel)) { all = false; continue; }
+				Meta km = read_meta(krel);
+				if (filelock_held_id(filelock_entry_id(km.id, k.name))) {
+					all = false;
+					continue;
+				}
 				unlink(abs(krel).c_str());
 				unlink(abs_meta(krel).c_str());
 			}
@@ -937,28 +953,6 @@ public:
 		m.editor_ip = ip;
 		m.mtime_ts = (long long)time(nullptr);
 		write_meta(to_rel, m);
-		/* every lock at the moved path OR under it follows the move: the
-		 * editing sessions rewrite their own path via the path event, so
-		 * the lock they will later release has to match */
-		{
-			std::lock_guard<std::mutex> lk(g_lock_mtx);
-			std::vector<std::pair<std::string, std::string>> mv;
-			for (auto it = g_filelocks.begin(); it != g_filelocks.end(); ++it) {
-				const std::string &p = it->first;
-				bool under = p == from_rel ||
-				    (p.size() > from_rel.size() &&
-				     p.compare(0, from_rel.size(), from_rel) == 0 &&
-				     p[from_rel.size()] == '/');
-				if (under)
-					mv.push_back({p, to_rel + p.substr(from_rel.size())});
-			}
-			for (auto &m : mv) {
-				unsigned long long owner = g_filelocks[m.first];
-				g_filelocks.erase(m.first);
-				g_filelocks[m.second] = owner;
-				g_lock_epoch++;
-			}
-		}
 		/* both the source and the destination changed: propagate upward on
 		 * both chains (mtime AND editor ip) */
 		touch_ancestors(to_rel, ip);
@@ -1397,12 +1391,17 @@ private:
 	bool dirty_ = false;
 	int anchor_logical_ = 0;            /* logical line at the top (resize anchor) */
 	int last_w_ = 0;
+	/* soft-wrap cache: only re-u8wrap lines that changed (not the whole doc) */
+	int editor_wrap_w_ = -1;
+	std::vector<std::vector<std::string>> editor_wrap_;
+	std::vector<std::pair<int, int>> editor_disp_;
+	bool editor_disp_dirty_ = true;
 	int name_scroll_ = 0;               /* marquee offset for the selected name */
 	int title_scroll_ = 0;              /* marquee offset for the title bar */
 	int msg_scroll_ = 0;                /* marquee offset for the message bar */
 	std::string msg_shown_;             /* message the scroll offset belongs to */
 	int sort_mode_ = 0;                 /* 0 = name, 1 = time */
-	std::string edit_lock_;             /* rel path currently locked for editing */
+	std::string edit_lock_id_;          /* meta id of the file locked for editing */
 
 	/* prompt/confirm */
 	int prompt_action_ = 0;
@@ -1481,7 +1480,14 @@ private:
 	void editor_save();
 	void leave_editor();
 	int editor_line_count() const { return (int)lines_.size(); }
-	std::vector<std::pair<int, int>> editor_display(); /* (logical, chunkstart) */
+	int editor_text_w() const;
+	void editor_invalidate_wrap();
+	void editor_sync_wrap();
+	void editor_touch_line(int li);
+	void editor_after_lines_change(int li, bool restructure);
+	const std::vector<std::pair<int, int>> &editor_display(); /* (logical, chunkstart) */
+	int editor_cursor_display_row() const;
+	int editor_total_display_rows() const;
 	void entry_lines(std::vector<std::vector<int>> &lines) const;
 	void cell_widths(const std::vector<int> &cells, int w[6]) const;
 	bool marquee_active() const;
@@ -1751,26 +1757,34 @@ void UI::process_events()
 		       (p.size() > pre.size() &&
 		        p.compare(0, pre.size(), pre) == 0 && p[pre.size()] == '/');
 	};
+	bool editing = (mode_ == EDITOR || base_ == EDITOR) && !edit_rel_.empty();
 	for (auto &e : evs) {
 		if (e.type == 0) {
-			/* moved: rewrite cwd / open editor path (locks already re-keyed) */
-			if (under(cwd_, e.a)) {
+			/* moved: rewrite cwd / open editor path (locks are by id, unchanged) */
+			if (!editing && under(cwd_, e.a)) {
 				cwd_ = e.b + cwd_.substr(e.a.size());
 				entries_.clear();
 			}
-			if (!edit_rel_.empty() && under(edit_rel_, e.a)) {
+			if (!edit_rel_.empty() && under(edit_rel_, e.a))
 				edit_rel_ = e.b + edit_rel_.substr(e.a.size());
-				edit_lock_ = edit_rel_;
-			}
 		} else if (e.type == 1) {
 			/* a folder we had open (or a parent of it) was deleted:
 			 * jump to its parent and tell the user */
-			if (under(cwd_, e.a)) {
+			if (!editing && under(cwd_, e.a)) {
 				size_t p = e.a.rfind('/');
 				cwd_ = (p == std::string::npos) ? std::string() : e.a.substr(0, p);
 				entries_.clear();
 				status_ = "the open folder was deleted";
 			}
+		}
+	}
+	/* while editing, cwd follows the open file (not independent parent renames) */
+	if (editing) {
+		size_t p = edit_rel_.rfind('/');
+		std::string parent = (p == std::string::npos) ? std::string() : edit_rel_.substr(0, p);
+		if (cwd_ != parent) {
+			cwd_ = parent;
+			entries_.clear();
 		}
 	}
 }
@@ -2060,8 +2074,8 @@ void UI::draw_list(std::string &s)
 		/* a file being edited elsewhere: reverse video on its name.  The
 		 * escapes are emitted AROUND the padded cell, never inside a string
 		 * that is clipped, so a marquee can not cut them off. */
-		std::string rel = cwd_.empty() ? e.name : cwd_ + "/" + e.name;
-		bool locked = !e.isdir && filelock_held(rel);
+		bool locked = !e.isdir &&
+		    filelock_held_id(filelock_entry_id(e.meta.id, e.name));
 		std::string nmpre, nmpost;
 		if (locked && !selected) { nmpre = "\x1b[7m"; nmpost = "\x1b[27m"; }
 		else if (locked && selected) { nmpre = "\x1b[27m"; nmpost = "\x1b[7m"; }
@@ -2096,7 +2110,7 @@ void UI::draw_list(std::string &s)
 
 /* ---- editor layout ---- */
 
-std::vector<std::pair<int, int>> UI::editor_display()
+int UI::editor_text_w() const
 {
 	int numw = 1;
 	{
@@ -2106,17 +2120,82 @@ std::vector<std::pair<int, int>> UI::editor_display()
 		numw = std::max(3, d) + 1;
 	}
 	int w = main_cols_ - numw - 1;   /* reserve one column for the cursor */
-	if (w < 1) w = 1;
-	std::vector<std::pair<int, int>> out;   /* (logical line, byte offset in line) */
+	return w < 1 ? 1 : w;
+}
+
+void UI::editor_invalidate_wrap()
+{
+	editor_wrap_w_ = -1;
+	editor_wrap_.clear();
+	editor_disp_.clear();
+	editor_disp_dirty_ = true;
+}
+
+void UI::editor_sync_wrap()
+{
+	int w = editor_text_w();
+	if (w != editor_wrap_w_ ||
+	    editor_wrap_.size() != (size_t)editor_line_count()) {
+		editor_wrap_w_ = w;
+		editor_wrap_.resize(lines_.size());
+		for (int li = 0; li < editor_line_count(); li++)
+			editor_wrap_[li] = u8wrap(lines_[li], w);
+		editor_disp_dirty_ = true;
+	}
+}
+
+void UI::editor_touch_line(int li)
+{
+	if (li < 0 || li >= editor_line_count())
+		return;
+	editor_sync_wrap();
+	editor_wrap_[li] = u8wrap(lines_[li], editor_wrap_w_);
+	editor_disp_dirty_ = true;
+}
+
+void UI::editor_after_lines_change(int li, bool restructure)
+{
+	if (restructure)
+		editor_invalidate_wrap();
+	else
+		editor_touch_line(li);
+}
+
+int UI::editor_total_display_rows() const
+{
+	int n = 0;
+	for (const auto &chunks : editor_wrap_)
+		n += (int)chunks.size();
+	return n;
+}
+
+int UI::editor_cursor_display_row() const
+{
+	int w = editor_text_w();
+	int d = 0;
+	for (int li = 0; li < cy_; li++)
+		d += (int)editor_wrap_[li].size();
+	int chunk = 0, col = 0;
+	cursor_chunk(lines_[cy_], cx_, w, chunk, col);
+	(void)col;
+	return d + chunk;
+}
+
+const std::vector<std::pair<int, int>> &UI::editor_display()
+{
+	editor_sync_wrap();
+	if (!editor_disp_dirty_)
+		return editor_disp_;
+	editor_disp_.clear();
 	for (int li = 0; li < editor_line_count(); li++) {
-		std::vector<std::string> chunks = u8wrap(lines_[li], w);
 		size_t off = 0;
-		for (size_t ci = 0; ci < chunks.size(); ci++) {
-			out.push_back({li, (int)off});
-			off += chunks[ci].size();
+		for (const std::string &chunk : editor_wrap_[li]) {
+			editor_disp_.push_back({li, (int)off});
+			off += chunk.size();
 		}
 	}
-	return out;
+	editor_disp_dirty_ = false;
+	return editor_disp_;
 }
 
 void UI::draw_editor(std::string &s)
@@ -2138,10 +2217,9 @@ void UI::draw_editor(std::string &s)
 		while (n > 0) { d++; n /= 10; }
 		numw = std::max(3, d) + 1;
 	}
-	int w = main_cols_ - numw - 1;   /* reserve one column for the cursor */
-	if (w < 1) w = 1;
+	int w = editor_text_w();
 
-	std::vector<std::pair<int, int>> disp = editor_display();
+	const std::vector<std::pair<int, int>> &disp = editor_display();
 
 	/* resize anchor: keep the logical line that was at the top */
 	if (w != last_w_) {
@@ -2150,20 +2228,8 @@ void UI::draw_editor(std::string &s)
 		last_w_ = w;
 	}
 
-	/* cursor display position */
-	int cdisp = 0;
-	{
-		int n = 0;
-		for (int li = 0; li < cy_; li++) {
-			std::vector<std::string> c = u8wrap(lines_[li], w);
-			n += (int)c.size();
-		}
-		std::vector<std::string> c = u8wrap(lines_[cy_], w);
-		int col = u8width(lines_[cy_].substr(0, cx_));
-		int ci = (w > 0) ? col / w : 0;
-		if (ci >= (int)c.size()) ci = (int)c.size() - 1;
-		cdisp = n + ci;
-	}
+	/* cursor display row (must match cursor_chunk / render()) */
+	int cdisp = editor_cursor_display_row();
 	if (cdisp < etop_) etop_ = cdisp;
 	if (cdisp >= etop_ + mainh) etop_ = cdisp - mainh + 1;
 	if (etop_ < 0) etop_ = 0;
@@ -2184,19 +2250,13 @@ void UI::draw_editor(std::string &s)
 		}
 		int li = disp[di].first;
 		int off = disp[di].second;
-		std::vector<std::string> chunks = u8wrap(lines_[li], w);
-		/* find the chunk index for this display line */
-		int ci = 0, acc = off;
-		(void)acc;
-		{
-			int seen = 0;
-			for (int k = 0; k < (int)disp.size(); k++) {
-				if (disp[k].first == li) {
-					if (k == di) break;
-					seen++;
-				}
-			}
-			ci = seen;
+		const std::vector<std::string> &chunks = editor_wrap_[li];
+		int ci = 0;
+		size_t acc = 0;
+		for (; ci < (int)chunks.size(); ci++) {
+			if ((int)acc == off)
+				break;
+			acc += chunks[ci].size();
 		}
 		std::string chunk = (ci < (int)chunks.size()) ? chunks[ci] : "";
 		std::string num = (ci == 0) ? sfmt("%*d ", numw - 1, li + 1) : std::string(numw, ' ');
@@ -2431,21 +2491,13 @@ void UI::render()
 		if (col > cols_) col = cols_;
 		s += sfmt("\x1b[%d;%dH\x1b[?25h", input_row_, col);
 	} else if (cv == EDITOR) {
-		int numw = 1;
-		{
-			int n = editor_line_count();
-			int d = 0;
-			while (n > 0) { d++; n /= 10; }
-			numw = std::max(3, d) + 1;
-		}
-		int w = main_cols_ - numw - 1;   /* reserve one column for the cursor */
-		if (w < 1) w = 1;
-		int cdisp = 0;
-		for (int li = 0; li < cy_; li++)
-			cdisp += (int)u8wrap(lines_[li], w).size();
+		editor_sync_wrap();
+		int w = editor_text_w();
+		int numw = main_cols_ - w - 1;   /* w = main_cols_ - numw - 1 */
+		int cdisp = editor_cursor_display_row();
 		int chunk = 0, col = 0;
 		cursor_chunk(lines_[cy_], cx_, w, chunk, col);
-		cdisp += chunk;
+		(void)chunk;
 		int ccol = numw + col;
 		if (ccol < 0) ccol = 0;
 		if (ccol > main_cols_ - 1) ccol = main_cols_ - 1;
@@ -2941,10 +2993,11 @@ void UI::handle_list(const KeyEvent &ev)
 			refresh(false);
 		} else {
 			edit_rel_ = cwd_.empty() ? e.name : cwd_ + "/" + e.name;
-			if (!filelock_acquire(edit_rel_, sid_)) {
+			std::string lid = filelock_entry_id(e.meta.id, e.name);
+			if (!filelock_acquire_id(lid, sid_)) {
 				status_ = "file is being edited by someone else";
 			} else {
-				edit_lock_ = edit_rel_;
+				edit_lock_id_ = lid;
 				editor_load(edit_rel_);
 				mode_ = EDITOR;
 			}
@@ -2997,6 +3050,7 @@ void UI::editor_load(const std::string &rel)
 	}
 	if (lines_.empty()) lines_.push_back("");
 	cy_ = cx_ = etop_ = 0;
+	editor_invalidate_wrap();
 	dirty_ = false;
 	status_.clear();
 }
@@ -3014,10 +3068,11 @@ void UI::editor_save()
 
 void UI::leave_editor()
 {
-	if (!edit_lock_.empty()) {
-		filelock_release(edit_lock_);
-		edit_lock_.clear();
+	if (!edit_lock_id_.empty()) {
+		filelock_release_id(edit_lock_id_);
+		edit_lock_id_.clear();
 	}
+	editor_invalidate_wrap();
 	mode_ = LIST;
 	refresh();
 }
@@ -3048,36 +3103,24 @@ void UI::handle_editor(const KeyEvent &ev)
 	case Key::PageUp:
 	case Key::PageDown: {
 		/* all movement is by VISUAL lines: soft-wrapped chunks count */
-		int numw = 1;
-		{
-			int n = editor_line_count();
-			int dgt = 0;
-			while (n > 0) { dgt++; n /= 10; }
-			numw = std::max(3, dgt) + 1;
-		}
-		int w = main_cols_ - numw - 1;
-		if (w < 1) w = 1;
 		layout();
+		editor_sync_wrap();
+		int w = editor_text_w();
 		int mainh = main_bottom_ - main_top_ + 1;
 		if (mainh < 1) mainh = 1;
 		bool page = (ev.key == Key::PageUp || ev.key == Key::PageDown);
 		int etop_old = etop_;
 		/* current visual row of the cursor + its column */
-		int d = 0;
-		for (int li = 0; li < cy_; li++)
-			d += (int)u8wrap(lines_[li], w).size();
+		int d = editor_cursor_display_row();
 		int chunk = 0, col = 0;
 		cursor_chunk(lines_[cy_], cx_, w, chunk, col);
-		d += chunk;
 		if (goal_col_ >= 0)
 			col = goal_col_;   /* vertical moves reuse the remembered column */
 		int nd;
 		if (page) {
 			/* phase 1: scroll the viewport a full page; the cursor has
 			 * nothing to do with this */
-			int total = 0;
-			for (int li = 0; li < editor_line_count(); li++)
-				total += (int)u8wrap(lines_[li], w).size();
+			int total = editor_total_display_rows();
 			if (ev.key == Key::PageUp)
 				etop_ -= mainh;
 			else
@@ -3102,7 +3145,7 @@ void UI::handle_editor(const KeyEvent &ev)
 		/* locate the logical line / chunk of visual row nd */
 		int total2 = 0, tl = -1, tc = 0;
 		for (int li = 0; li < editor_line_count(); li++) {
-			int nch = (int)u8wrap(lines_[li], w).size();
+			int nch = (int)editor_wrap_[li].size();
 			if (nd < total2 + nch) { tl = li; tc = nd - total2; break; }
 			total2 += nch;
 		}
@@ -3133,6 +3176,7 @@ void UI::handle_editor(const KeyEvent &ev)
 			lines_[cy_].erase(k, cx_ - k);
 			cx_ = k;
 			dirty_ = true;
+			editor_after_lines_change(cy_, false);
 		} else if (cy_ > 0) {
 			int prevlen = (int)lines_[cy_ - 1].size();
 			lines_[cy_ - 1] += lines_[cy_];
@@ -3140,6 +3184,7 @@ void UI::handle_editor(const KeyEvent &ev)
 			cy_--;
 			cx_ = prevlen;
 			dirty_ = true;
+			editor_after_lines_change(cy_, true);
 		}
 		break;
 	case Key::Delete:
@@ -3147,10 +3192,12 @@ void UI::handle_editor(const KeyEvent &ev)
 			int k = (int)next_cluster(lines_[cy_], (size_t)cx_);
 			lines_[cy_].erase(cx_, k - cx_);
 			dirty_ = true;
+			editor_after_lines_change(cy_, false);
 		} else if (cy_ + 1 < editor_line_count()) {
 			lines_[cy_] += lines_[cy_ + 1];
 			lines_.erase(lines_.begin() + cy_ + 1);
 			dirty_ = true;
+			editor_after_lines_change(cy_, true);
 		}
 		break;
 	case Key::Enter: {
@@ -3159,6 +3206,7 @@ void UI::handle_editor(const KeyEvent &ev)
 		lines_.insert(lines_.begin() + cy_ + 1, rest);
 		cy_++; cx_ = 0;
 		dirty_ = true;
+		editor_after_lines_change(cy_ - 1, true);
 		break;
 	}
 	case Key::Char:
@@ -3166,6 +3214,7 @@ void UI::handle_editor(const KeyEvent &ev)
 		goal_col_ = -1;
 		cx_ += (int)ev.text.size();
 		dirty_ = true;
+		editor_after_lines_change(cy_, false);
 		break;
 	case Key::CtrlS: editor_save(); break;
 	case Key::CtrlG: open_prompt(5, "goto line: ", ""); break;
@@ -3639,10 +3688,9 @@ void UI::run(ssh_channel ch, int cols, int rows)
 		}
 	} catch (int) {
 	}
-	/* release every editor lock this session owns (its path may have been
-	 * rewritten by a move while it held the lock) */
+	/* release every editor lock this session owns (keyed by entry id) */
 	filelock_release_owner(sid_);
-	edit_lock_.clear();
+	edit_lock_id_.clear();
 	{
 		std::lock_guard<std::mutex> lk(g_sess_mtx);
 		g_sessions.erase(sid_);
