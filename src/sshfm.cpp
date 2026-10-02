@@ -137,8 +137,8 @@ static unsigned long long get_version()
 	return g_version;
 }
 
-/* A file being edited by one session cannot be opened by another.  Locks are
- * keyed by the entry's stable meta id (not path), so renames do not re-key. */
+/* Viewing never locks a file; the first change holds it until save/discard.
+ * Locks use the stable meta id, so renames do not re-key them. */
 static std::mutex g_lock_mtx;
 static std::map<std::string, unsigned long long> g_filelocks;   /* id -> sid */
 /* bumped whenever a lock is taken or released, so every session can
@@ -640,20 +640,31 @@ static bool read_file(const std::string &path, std::string &out)
 	while ((n = read(fd, buf, sizeof(buf))) > 0)
 		out.append(buf, (size_t)n);
 	close(fd);
-	return true;
+	return n == 0;
 }
 
 static bool write_file(const std::string &path, const std::string &data)
 {
-	int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	/* Readers see either complete version, never a partially written save. */
+	size_t slash = path.rfind('/');
+	std::string tmp = (slash == std::string::npos ? "" : path.substr(0, slash + 1))
+	                + ".sshfm-XXXXXX";
+	int fd = mkstemp(&tmp[0]);
 	if (fd < 0) return false;
+	struct stat sb;
+	mode_t perms = stat(path.c_str(), &sb) == 0 ? (sb.st_mode & 0777) : 0644;
+	if (fchmod(fd, perms) != 0) { close(fd); unlink(tmp.c_str()); return false; }
 	size_t off = 0;
 	while (off < data.size()) {
 		ssize_t n = write(fd, data.data() + off, data.size() - off);
-		if (n <= 0) { close(fd); return false; }
+		if (n < 0 && errno == EINTR) continue;
+		if (n <= 0) { close(fd); unlink(tmp.c_str()); return false; }
 		off += (size_t)n;
 	}
-	close(fd);
+	if (close(fd) != 0 || rename(tmp.c_str(), path.c_str()) != 0) {
+		unlink(tmp.c_str());
+		return false;
+	}
 	return true;
 }
 
@@ -948,8 +959,11 @@ public:
 		/* make sure the renamed entry carries a stable id (upgrade old
 		 * sidecars that predate ids) and record the move on itself */
 		Meta m = read_meta(to_rel);
-		if (m.id.empty())
-			m.id = new_id();
+		if (m.id.empty()) {
+			/* Preserve the lock key used by entries without a sidecar id. */
+			size_t p = from_rel.rfind('/');
+			m.id = (p == std::string::npos) ? from_rel : from_rel.substr(p + 1);
+		}
 		m.editor_ip = ip;
 		m.mtime_ts = (long long)time(nullptr);
 		write_meta(to_rel, m);
@@ -961,11 +975,9 @@ public:
 		return true;
 	}
 
-	std::string read_content(const std::string &rel) const
+	bool read_content(const std::string &rel, std::string &data) const
 	{
-		std::string d;
-		read_file(abs(rel), d);
-		return d;
+		return read_file(abs(rel), data);
 	}
 
 	bool save_content(const std::string &rel, const std::string &data,
@@ -1476,7 +1488,8 @@ private:
 	void open_confirm(int action, const std::string &what);
 	void do_prompt_commit();
 
-	void editor_load(const std::string &rel);
+	bool editor_load(const std::string &rel, bool keep_position = false);
+	bool editor_begin_change();
 	void editor_save();
 	void leave_editor();
 	int editor_line_count() const { return (int)lines_.size(); }
@@ -2990,14 +3003,9 @@ void UI::handle_list(const KeyEvent &ev)
 			refresh(false);
 		} else {
 			edit_rel_ = cwd_.empty() ? e.name : cwd_ + "/" + e.name;
-			std::string lid = filelock_entry_id(e.meta.id, e.name);
-			if (!filelock_acquire_id(lid, sid_)) {
-				status_ = "file is being edited by someone else";
-			} else {
-				edit_lock_id_ = lid;
-				editor_load(edit_rel_);
+			if (editor_load(edit_rel_)) {
 				mode_ = EDITOR;
-			}
+			} else status_ = "read failed";
 		}
 		break;
 	}
@@ -3034,9 +3042,11 @@ void UI::handle_list(const KeyEvent &ev)
 
 /* ---- editor ---- */
 
-void UI::editor_load(const std::string &rel)
+bool UI::editor_load(const std::string &rel, bool keep_position)
 {
-	std::string data = sb_.read_content(rel);
+	std::string data;
+	if (!sb_.read_content(rel, data)) return false;
+	int old_cy = cy_, old_cx = cx_;
 	lines_.clear();
 	size_t pos = 0;
 	while (pos <= data.size()) {
@@ -3046,21 +3056,62 @@ void UI::editor_load(const std::string &rel)
 		pos = e + 1;
 	}
 	if (lines_.empty()) lines_.push_back("");
-	cy_ = cx_ = etop_ = 0;
+	if (keep_position) {
+		cy_ = std::min(old_cy, editor_line_count() - 1);
+		cx_ = 0;
+		/* The saved line may have different UTF-8 cluster boundaries. */
+		while (cx_ < (int)lines_[cy_].size()) {
+			int next = (int)next_cluster(lines_[cy_], (size_t)cx_);
+			if (next > old_cx) break;
+			cx_ = next;
+		}
+	} else {
+		cy_ = cx_ = etop_ = 0;
+		status_.clear();
+	}
+	goal_col_ = -1;
 	editor_invalidate_wrap();
 	dirty_ = false;
+	return true;
+}
+
+bool UI::editor_begin_change()
+{
+	if (!edit_lock_id_.empty()) return true;
+	Meta m = sb_.read_meta(edit_rel_);
+	size_t p = edit_rel_.rfind('/');
+	std::string name = (p == std::string::npos) ? edit_rel_ : edit_rel_.substr(p + 1);
+	std::string lid = filelock_entry_id(m.id, name);
+	if (!filelock_acquire_id(lid, sid_)) {
+		status_ = "file is being edited by someone else";
+		return false;
+	}
+	edit_lock_id_ = lid;
+	/* A different writer may have saved since this viewer last refreshed. */
+	if (!editor_load(edit_rel_, true)) {
+		leave_editor();
+		status_ = "the open file is no longer available";
+		return false;
+	}
 	status_.clear();
+	return true;
 }
 
 void UI::editor_save()
 {
+	if (!dirty_) { status_ = "no changes to save"; return; }
 	std::string data;
 	for (size_t i = 0; i < lines_.size(); i++) {
 		data += lines_[i];
 		if (i + 1 < lines_.size()) data += "\n";
 	}
 	status_ = sb_.save_content(edit_rel_, data, ip_) ? "saved" : "save failed";
-	if (status_ == "saved") { dirty_ = false; bump_version(); }
+	if (status_ == "saved") {
+		dirty_ = false;
+		bump_version();
+		filelock_release_id(edit_lock_id_);
+		edit_lock_id_.clear();
+	}
 }
 
 void UI::leave_editor()
@@ -3069,8 +3120,15 @@ void UI::leave_editor()
 		filelock_release_id(edit_lock_id_);
 		edit_lock_id_.clear();
 	}
+	/* A viewed file's parent may have been deleted too. */
+	while (!cwd_.empty() && !sb_.is_dir(cwd_)) {
+		size_t p = cwd_.rfind('/');
+		cwd_ = (p == std::string::npos) ? std::string() : cwd_.substr(0, p);
+	}
 	editor_invalidate_wrap();
 	mode_ = LIST;
+	base_ = LIST;
+	edit_rel_.clear();
 	refresh();
 }
 
@@ -3159,6 +3217,8 @@ void UI::handle_editor(const KeyEvent &ev)
 	case Key::Home: cx_ = 0; editor_remember_goal(); break;
 	case Key::End: cx_ = (int)lines_[cy_].size(); editor_remember_goal(); break;
 	case Key::Backspace:
+		if (cx_ == 0 && cy_ == 0) break;
+		if (!editor_begin_change()) break;
 		if (cx_ > 0) {
 			int k = (int)prev_cluster(lines_[cy_], (size_t)cx_);
 			lines_[cy_].erase(k, cx_ - k);
@@ -3176,6 +3236,8 @@ void UI::handle_editor(const KeyEvent &ev)
 		}
 		break;
 	case Key::Delete:
+		if (cx_ == (int)lines_[cy_].size() && cy_ + 1 == editor_line_count()) break;
+		if (!editor_begin_change()) break;
 		if (cx_ < (int)lines_[cy_].size()) {
 			int k = (int)next_cluster(lines_[cy_], (size_t)cx_);
 			lines_[cy_].erase(cx_, k - cx_);
@@ -3189,6 +3251,7 @@ void UI::handle_editor(const KeyEvent &ev)
 		}
 		break;
 	case Key::Enter: {
+		if (!editor_begin_change()) break;
 		std::string rest = lines_[cy_].substr(cx_);
 		lines_[cy_].erase(cx_);
 		lines_.insert(lines_.begin() + cy_ + 1, rest);
@@ -3198,6 +3261,7 @@ void UI::handle_editor(const KeyEvent &ev)
 		break;
 	}
 	case Key::Char:
+		if (!editor_begin_change()) break;
 		lines_[cy_].insert(cx_, ev.text);
 		goal_col_ = -1;
 		cx_ += (int)ev.text.size();
@@ -3211,6 +3275,11 @@ void UI::handle_editor(const KeyEvent &ev)
 		else leave_editor();
 		break;
 	default: break;
+	}
+	/* Reloading can make a Delete/Backspace a no-op. */
+	if (!dirty_ && !edit_lock_id_.empty()) {
+		filelock_release_id(edit_lock_id_);
+		edit_lock_id_.clear();
 	}
 }
 
@@ -3655,6 +3724,11 @@ void UI::run(ssh_channel ch, int cols, int rows)
 			if (get_version() != seen_version_) {
 				seen_version_ = get_version();
 				process_events();
+				if (content_view() == EDITOR && !dirty_ &&
+				    !editor_load(edit_rel_, true)) {
+					leave_editor();
+					status_ = "the open file was deleted or cannot be read";
+				}
 				if (mode_ != EDITOR) refresh();
 			}
 			process_bells();
