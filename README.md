@@ -1,4 +1,4 @@
-# sshfm-MITAHILL-REMAKE-VERSION
+# MitaHill-sshfm
 
 ## 这是什么？
 基于原版`QianCF/sshfm:main`进行的重构和概念现代优化。
