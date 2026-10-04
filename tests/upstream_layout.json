@@ -1,0 +1,1017 @@
+{
+  "source": "MitaHill/sshfm fd263ad0a85d36cce78921973f1612b353e12831 UI::layout/entry_lines/cell_widths",
+  "cases": [
+    {
+      "cols": 12,
+      "rows": 6,
+      "editor": false,
+      "prompt": false,
+      "expected": {
+        "top": 8,
+        "bottom": 8,
+        "keys": [
+          "n:new       ",
+          "N:mkdir     ",
+          "m:move      ",
+          "d:delete    ",
+          "Enter:open  ",
+          "g:goto      ",
+          "b:bel       ",
+          "B:bcast     ",
+          "^B:bel-all  ",
+          "t:time      ",
+          "s:name      ",
+          "r:reload    ",
+          "Esc:back    ",
+          "q:quit      "
+        ],
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            18
+          ],
+          [
+            11
+          ],
+          [
+            12
+          ],
+          [
+            12
+          ],
+          [
+            15
+          ],
+          [
+            15
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 12,
+      "rows": 6,
+      "editor": true,
+      "prompt": false,
+      "expected": {
+        "top": 2,
+        "bottom": 2,
+        "keys": [
+          "^S:save     ",
+          "^G:goto     ",
+          "Esc:back    "
+        ],
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            18
+          ],
+          [
+            11
+          ],
+          [
+            12
+          ],
+          [
+            12
+          ],
+          [
+            15
+          ],
+          [
+            15
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 12,
+      "rows": 6,
+      "editor": false,
+      "prompt": true,
+      "expected": {
+        "top": 8,
+        "bottom": 8,
+        "keys": [
+          "Enter:ok    ",
+          "Esc:cancel  "
+        ],
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            18
+          ],
+          [
+            11
+          ],
+          [
+            12
+          ],
+          [
+            12
+          ],
+          [
+            15
+          ],
+          [
+            15
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 12,
+      "rows": 6,
+      "editor": true,
+      "prompt": true,
+      "expected": {
+        "top": 2,
+        "bottom": 2,
+        "keys": [
+          "Enter:ok    ",
+          "Esc:cancel  "
+        ],
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            18
+          ],
+          [
+            11
+          ],
+          [
+            12
+          ],
+          [
+            12
+          ],
+          [
+            15
+          ],
+          [
+            15
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 24,
+      "rows": 10,
+      "editor": false,
+      "prompt": false,
+      "expected": {
+        "top": 7,
+        "bottom": 7,
+        "keys": [
+          "n:new  N:mkdir  m:move  ",
+          "d:delete   Enter:open   ",
+          "g:goto  b:bel  B:bcast  ",
+          "^B:bel-all    t:time    ",
+          "s:name     r:reload     ",
+          "Esc:back     q:quit     "
+        ],
+        "groups": [
+          [
+            0
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            23
+          ],
+          [
+            8,
+            14
+          ],
+          [
+            23
+          ],
+          [
+            23
+          ],
+          [
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 24,
+      "rows": 10,
+      "editor": true,
+      "prompt": false,
+      "expected": {
+        "top": 2,
+        "bottom": 6,
+        "keys": [
+          "^S:save     ^G:goto     ",
+          "Esc:back                "
+        ],
+        "groups": [
+          [
+            0
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            23
+          ],
+          [
+            8,
+            14
+          ],
+          [
+            23
+          ],
+          [
+            23
+          ],
+          [
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 24,
+      "rows": 10,
+      "editor": false,
+      "prompt": true,
+      "expected": {
+        "top": 7,
+        "bottom": 7,
+        "keys": [
+          "Enter:ok   Esc:cancel   "
+        ],
+        "groups": [
+          [
+            0
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            23
+          ],
+          [
+            8,
+            14
+          ],
+          [
+            23
+          ],
+          [
+            23
+          ],
+          [
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 24,
+      "rows": 10,
+      "editor": true,
+      "prompt": true,
+      "expected": {
+        "top": 2,
+        "bottom": 7,
+        "keys": [
+          "Enter:ok   Esc:cancel   "
+        ],
+        "groups": [
+          [
+            0
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            23
+          ],
+          [
+            8,
+            14
+          ],
+          [
+            23
+          ],
+          [
+            23
+          ],
+          [
+            23
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 40,
+      "rows": 12,
+      "editor": false,
+      "prompt": false,
+      "expected": {
+        "top": 5,
+        "bottom": 6,
+        "keys": [
+          "n:new    N:mkdir    m:move   d:delete   ",
+          "Enter:open   g:goto   b:bel   B:bcast   ",
+          "^B:bel-all   t:time   s:name  r:reload  ",
+          "Esc:back             q:quit             "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            19,
+            6,
+            12
+          ],
+          [
+            18,
+            20
+          ],
+          [
+            39
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 40,
+      "rows": 12,
+      "editor": true,
+      "prompt": false,
+      "expected": {
+        "top": 2,
+        "bottom": 9,
+        "keys": [
+          "^S:save      ^G:goto      Esc:back      "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            19,
+            6,
+            12
+          ],
+          [
+            18,
+            20
+          ],
+          [
+            39
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 40,
+      "rows": 12,
+      "editor": false,
+      "prompt": true,
+      "expected": {
+        "top": 5,
+        "bottom": 9,
+        "keys": [
+          "Enter:ok           Esc:cancel           "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            19,
+            6,
+            12
+          ],
+          [
+            18,
+            20
+          ],
+          [
+            39
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 40,
+      "rows": 12,
+      "editor": true,
+      "prompt": true,
+      "expected": {
+        "top": 2,
+        "bottom": 9,
+        "keys": [
+          "Enter:ok           Esc:cancel           "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            19,
+            6,
+            12
+          ],
+          [
+            18,
+            20
+          ],
+          [
+            39
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 80,
+      "rows": 24,
+      "editor": false,
+      "prompt": false,
+      "expected": {
+        "top": 4,
+        "bottom": 20,
+        "keys": [
+          "n:new N:mkdir m:move d:delete Enter:open g:goto b:bel B:bcast ^B:bel-all t:time ",
+          "s:name             r:reload             Esc:back             q:quit             "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            21,
+            9,
+            14,
+            14,
+            17
+          ],
+          [
+            79
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 80,
+      "rows": 24,
+      "editor": true,
+      "prompt": false,
+      "expected": {
+        "top": 2,
+        "bottom": 21,
+        "keys": [
+          "^S:save                    ^G:goto                   Esc:back                   "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            21,
+            9,
+            14,
+            14,
+            17
+          ],
+          [
+            79
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 80,
+      "rows": 24,
+      "editor": false,
+      "prompt": true,
+      "expected": {
+        "top": 4,
+        "bottom": 21,
+        "keys": [
+          "Enter:ok                               Esc:cancel                               "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            21,
+            9,
+            14,
+            14,
+            17
+          ],
+          [
+            79
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 80,
+      "rows": 24,
+      "editor": true,
+      "prompt": true,
+      "expected": {
+        "top": 2,
+        "bottom": 21,
+        "keys": [
+          "Enter:ok                               Esc:cancel                               "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          [
+            5
+          ]
+        ],
+        "widths": [
+          [
+            21,
+            9,
+            14,
+            14,
+            17
+          ],
+          [
+            79
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 90,
+      "rows": 24,
+      "editor": false,
+      "prompt": false,
+      "expected": {
+        "top": 3,
+        "bottom": 20,
+        "keys": [
+          "n:new  N:mkdir  m:move  d:delete Enter:open g:goto b:bel B:bcast ^B:bel-all t:time s:name ",
+          "r:reload                       Esc:back                       q:quit                      "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        ],
+        "widths": [
+          [
+            19,
+            7,
+            13,
+            13,
+            16,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 90,
+      "rows": 24,
+      "editor": true,
+      "prompt": false,
+      "expected": {
+        "top": 2,
+        "bottom": 21,
+        "keys": [
+          "^S:save                       ^G:goto                       Esc:back                      "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        ],
+        "widths": [
+          [
+            19,
+            7,
+            13,
+            13,
+            16,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 90,
+      "rows": 24,
+      "editor": false,
+      "prompt": true,
+      "expected": {
+        "top": 3,
+        "bottom": 21,
+        "keys": [
+          "Enter:ok                                    Esc:cancel                                    "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        ],
+        "widths": [
+          [
+            19,
+            7,
+            13,
+            13,
+            16,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 90,
+      "rows": 24,
+      "editor": true,
+      "prompt": true,
+      "expected": {
+        "top": 2,
+        "bottom": 21,
+        "keys": [
+          "Enter:ok                                    Esc:cancel                                    "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        ],
+        "widths": [
+          [
+            19,
+            7,
+            13,
+            13,
+            16,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 120,
+      "rows": 30,
+      "editor": false,
+      "prompt": false,
+      "expected": {
+        "top": 3,
+        "bottom": 27,
+        "keys": [
+          "n:new  N:mkdir  m:move  d:delete  Enter:open  g:goto  b:bel  B:bcast  ^B:bel-all t:time s:name r:reload Esc:back q:quit "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        ],
+        "widths": [
+          [
+            24,
+            12,
+            18,
+            18,
+            21,
+            21
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 120,
+      "rows": 30,
+      "editor": true,
+      "prompt": false,
+      "expected": {
+        "top": 2,
+        "bottom": 27,
+        "keys": [
+          "^S:save                                 ^G:goto                                 Esc:back                                "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        ],
+        "widths": [
+          [
+            24,
+            12,
+            18,
+            18,
+            21,
+            21
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 120,
+      "rows": 30,
+      "editor": false,
+      "prompt": true,
+      "expected": {
+        "top": 3,
+        "bottom": 27,
+        "keys": [
+          "Enter:ok                                                   Esc:cancel                                                   "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        ],
+        "widths": [
+          [
+            24,
+            12,
+            18,
+            18,
+            21,
+            21
+          ]
+        ]
+      }
+    },
+    {
+      "cols": 120,
+      "rows": 30,
+      "editor": true,
+      "prompt": true,
+      "expected": {
+        "top": 2,
+        "bottom": 27,
+        "keys": [
+          "Enter:ok                                                   Esc:cancel                                                   "
+        ],
+        "groups": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        ],
+        "widths": [
+          [
+            24,
+            12,
+            18,
+            18,
+            21,
+            21
+          ]
+        ]
+      }
+    }
+  ]
+}

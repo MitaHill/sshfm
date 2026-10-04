@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.sqlite3*
+sshfm_hostkey*
+.git/
+.github/
+.DS_Store
+.venv/
+build/
+dist/
+*.egg-info/

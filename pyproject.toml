@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sshfm"
+version = "0.1.0"
+description = "SSH terminal file manager and editor with a SQLite virtual filesystem"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "asyncssh==2.24.0",
+    "prompt_toolkit==3.0.53",
+    "regex==2026.9.29",
+    "wcwidth==0.9.1",
+]
+
+[project.scripts]
+sshfm = "sshfm.server:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sshfm = ["collation.bin.zlib"]
