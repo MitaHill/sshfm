@@ -7,3 +7,4 @@ sshfm_hostkey*
 build/
 dist/
 *.egg-info/
+docs/
