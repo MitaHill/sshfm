@@ -1,7 +1,7 @@
-# sshfm
+# sshfm-MITAHILL-REMAKE-VERSION
 
-通过 SSH 使用的文件管理器与文本编辑器，基于 Python、SQLite 和 Docker。
-支持多会话查看、独占编辑锁、鼠标操作、中文和 emoji。
+## 这是什么？
+基于原版`QianCF/sshfm:main`进行的重构和概念现代优化。
 
 ## 启动
 
