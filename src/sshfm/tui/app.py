@@ -1,12 +1,11 @@
-"""Full-screen file browser and editor on a raw SSH terminal channel."""
+"""SSH input loop and file operations for the terminal interface."""
 
 import asyncio
 from collections import deque
-from datetime import datetime, timezone, timedelta
-import time
 import logging
 import re
 import sqlite3
+import time
 import uuid
 
 import asyncssh
@@ -14,80 +13,63 @@ from prompt_toolkit.input.vt100_parser import Vt100Parser
 from prompt_toolkit.key_binding.key_processor import KeyPress
 from prompt_toolkit.keys import Keys
 
-from .editor import CellWidth, Editor, GRAPHEME, clip, display, display_ansi, pad
-from .store import StoreError
-from .collation import name_key
-from .layout import HEADERS, Layout, marquee, size_text
+from ..editor import Editor, GRAPHEME, display
+from ..store import StoreError
+from .render import Presence, Renderer, format_time
+from .state import State, layout, metrics
 
 
-class TUI:
-    def __init__(self, process, service, time_offset=0):
+class TUI(State):
+    def __init__(self, process, service, time_offset=0, config=None):
+        super().__init__(process.get_extra_info('peername')[0], time_offset,
+                         config.settings.banner if config else '')
         self.process = process
         self.service = service
         self.owner = uuid.uuid4().hex
-        self.ip = process.get_extra_info('peername')[0]
-        self.time_offset = time_offset
-        self.cwd_id = 1
-        self.path = '/'
-        self.entries = []
-        self.selected = 0
-        self.top = 0
-        self.sort = 'time'
-        self.file = None
-        self.editor = Editor()
-        self.saved_text = ''
-        self.editor_top = 0
-        self.mode = 'browser'
-        self.return_mode = 'browser'
-        self.prompt_action = None
-        self.prompt_label = ''
-        self.prompt = Editor()
-        self.prompt_target = None
-        self.status = ''
-        self.scroll = 0
-        self.name_scroll = 0
-        self.msg_scroll = 0
-        self.msg_shown = ''
-        self.prompt_scroll = 0
-        self.anchor_line = 1
-        self.last_text_width = None
-        self.redraw = True
-        self.running = True
-        self.version = -1
-        self.last_size = None
+        self.config = config
         self.keys = deque()
         self.parser = Vt100Parser(self.keys.append)
-        self.cells = CellWidth()
-        self.last_click = None
-
-    @property
-    def dirty(self):
-        return self.file is not None and self.editor.text != self.saved_text
 
     def size(self):
         width, height, _, _ = self.process.get_terminal_size()
         return width or 80, height or 24
 
     def layout(self):
-        return Layout(*self.size(), self.file is not None, self.mode == 'prompt', self.cells)
+        return layout(self, self.size())
 
     def metrics(self):
-        layout = self.layout()
-        number_width = max(3, len(str(self.editor.text.count('\n') + 1))) + 1
-        return max(1, layout.main_cols - number_width - 1), layout.height, number_width
+        return metrics(self, self.size())
 
-    def sort_entries(self):
-        self.entries.sort(key=lambda item: ((-(item['updated_at'] // 1_000_000_000),)
-                                            if self.sort == 'time' else ()) +
-                          (name_key(item['name']),))
+    def renderer(self):
+        locks, sessions = self.service.locks, self.service.sessions
+        owner = locks.get(self.file['id']) if self.file else None
+        session = sessions.get(owner)
+        presence = Presence(frozenset(locks), session.ip if session else '',
+                            sum(ui.cwd_id == self.cwd_id for ui in sessions.values())
+                            if not self.file else 0,
+                            len(sessions))
+        return Renderer(self, self.size(), presence)
+
+    def editor_title(self):
+        return self.renderer().editor_title()
+
+    def header(self):
+        return self.renderer().header()
+
+    def render(self):
+        self.process.stdout.write(self.renderer().render())
+        self.redraw = False
+
+    def marquee_active(self):
+        return self.renderer().marquee_active()
+
+    def format_time(self, stamp):
+        return format_time(stamp, self.time_offset)
 
     def absolute(self, path):
         if not path.startswith('/'):
             path = self.path.rstrip('/') + '/' + path
         return '/' + '/'.join(self.service.store.parts(path))
-
-    def selected_entry(self):
-        return self.entries[self.selected] if self.entries else None
 
     async def refresh(self, force=False):
         if not force and self.version == self.service.version:
@@ -133,20 +115,6 @@ class TUI:
                 self.file = current
         self.version = version
         self.redraw = True
-
-    def ask(self, action, label, value='', target=None):
-        self.return_mode = self.mode
-        self.mode = 'prompt'
-        self.prompt_action = action
-        self.prompt_label = label
-        self.prompt = Editor(value)
-        self.prompt.pos = len(value)
-        self.prompt_target = target
-        self.prompt_scroll = 0
-
-    def cancel_prompt(self):
-        self.mode = self.return_mode
-        self.prompt_action = None
 
     async def confirm_prompt(self):
         action, value = self.prompt_action, self.prompt.text
@@ -472,169 +440,6 @@ class TUI:
             if double:
                 await self.handle_key(KeyPress(Keys.ControlM, '\r'))
 
-    def editor_title(self):
-        line = self.editor.text.count('\n', 0, self.editor.pos) + 1
-        total = self.editor.text.count('\n') + 1
-        title = f' edit: {self.file["path"].lstrip("/")}   line {line}/{total}'
-        owner = self.service.locks.get(self.file['id'])
-        session = self.service.sessions.get(owner)
-        if session is not None:
-            title += f'   locked by {session.ip}'
-        return title
-
-    def render(self):
-        layout = self.layout()
-        cols, height = layout.cols, layout.rows
-        editor_mode = self.file is not None
-        cursor = None
-        output = ['\x1b[?25l']
-        if self.last_size != self.size():
-            output.append('\x1b[2J')
-            self.last_size = self.size()
-
-        def put(row, text='', reverse=False, width=None, raw=False):
-            if width is None:
-                width = cols
-            shown = text if raw else pad(text, width, self.cells)
-            output.append(f'\x1b[{row};1H\x1b[0m\x1b[K' + ('\x1b[7m' if reverse else '') +
-                          shown + '\x1b[0m')
-
-        here = sum(ui.cwd_id == self.cwd_id for ui in self.service.sessions.values())
-        title = (self.editor_title()
-                 if editor_mode else f' sshfm  /{self.path.lstrip("/")}   [{self.ip}]   ol {here}/{len(self.service.sessions)}')
-        put(1, marquee(title, self.scroll, cols, self.cells), True)
-        total, first, count = 0, 0, layout.height
-        if editor_mode:
-            text_width, _, numw = self.metrics()
-            visual = self.editor.rows(text_width, self.cells)
-            if self.last_text_width != text_width:
-                self.editor_top = next((i for i, row in enumerate(visual) if row.number == self.anchor_line), 0)
-                self.last_text_width = text_width
-            crow, ccol = self.editor.cursor(visual, self.cells)
-            if crow < self.editor_top:
-                self.editor_top = crow
-            elif crow >= self.editor_top + layout.height:
-                self.editor_top = crow - layout.height + 1
-            self.editor_top = max(0, min(self.editor_top, len(visual) - layout.height))
-            for index in range(layout.height):
-                vi = self.editor_top + index
-                text = ''
-                if vi < len(visual):
-                    row = visual[vi]
-                    number = (f'{row.number:>{numw - 1}} ' if vi == 0 or visual[vi - 1].number != row.number
-                              else ' ' * numw)
-                    text = number + display_ansi(self.editor.text[row.start:row.end]) + ' ' * max(0, layout.main_cols - numw - self.cells(row.text))
-                put(layout.top + index, text if text else ' ' * layout.main_cols, raw=True)
-            cursor = (crow - self.editor_top + layout.top, numw + ccol + 1)
-            total, first = len(visual), self.editor_top
-            self.anchor_line = visual[self.editor_top].number
-        else:
-            for index, group in enumerate(layout.groups):
-                widths = layout.widths(group)
-                text = ' '.join(pad(HEADERS[c], widths[c], self.cells) if c != 1 else
-                                HEADERS[c].rjust(widths[c]) for c in group)
-                put(2 + index, text, width=cols)
-            self.top = max(0, min(self.top, max(0, len(self.entries) - layout.visible)))
-            if self.selected < self.top:
-                self.top = self.selected
-            elif self.selected >= self.top + layout.visible:
-                self.top = self.selected - layout.visible + 1
-            row_number = layout.top
-            for index in range(self.top, len(self.entries)):
-                if row_number > layout.bottom:
-                    break
-                entry = self.entries[index]
-                selected = index == self.selected
-                values = [entry['name'] + ('/' if entry['kind'] == 'dir' else ''),
-                          '<DIR>' if entry['kind'] == 'dir' else str(entry['size']),
-                          self.format_time(entry['created_at']), self.format_time(entry['updated_at']),
-                          entry['creator_ip'], entry['editor_ip']]
-                for group in layout.groups:
-                    if row_number > layout.bottom:
-                        break
-                    widths = layout.widths(group)
-                    parts = []
-                    for c in group:
-                        value = values[c]
-                        if c == 1 and entry['kind'] != 'dir':
-                            value = size_text(entry['size'], widths[c])
-                        if c == 0 and selected:
-                            value = marquee(value, self.name_scroll, widths[c], self.cells)
-                        value = pad(value, widths[c], self.cells)
-                        if c == 1:
-                            value = value.strip().rjust(widths[c])
-                        if c == 0 and entry['id'] in self.service.locks:
-                            value = ('\x1b[27m' if selected else '\x1b[7m') + value + (
-                                     '\x1b[7m' if selected else '\x1b[27m')
-                        parts.append(value)
-                    put(row_number, ' '.join(parts), selected, raw=True)
-                    row_number += 1
-            for row in range(row_number, layout.bottom + 1):
-                put(row, '', width=layout.main_cols)
-            total, first, count = len(self.entries), self.top, layout.visible
-        # The rightmost cell is dedicated to the upstream scrollbar.
-        thumb = max(1, layout.height * count // max(1, total))
-        start = first * (layout.height - thumb) // max(1, total - count)
-        for row in range(layout.height):
-            bar = ' ' if total <= count else '║' if start <= row < start + thumb else '│'
-            output.append(f'\x1b[{layout.top + row};{cols}H\x1b[0m{bar}')
-        for index, keys in enumerate(layout.keys):
-            put(height - 1 - len(layout.keys) + index, keys, True)
-        if self.status != self.msg_shown:
-            self.msg_scroll = 0
-            self.msg_shown = self.status
-        put(height - 1, marquee(self.status, self.msg_scroll, cols, self.cells))
-        put(height)
-        if self.mode == 'prompt':
-            label = self.prompt_label
-            labw = self.cells(label)
-            available = max(1, cols - labw)
-            textw = max(1, available - 1)
-            x = self.cells(display(self.prompt.text))
-            minimum = max(1, min(x, available // 4))
-            showw = max(1, minimum, min(x, textw))
-            curw = self.cells(display(self.prompt.text[:self.prompt.pos]))
-            if curw < self.prompt_scroll:
-                self.prompt_scroll = curw
-            if curw - self.prompt_scroll > showw:
-                self.prompt_scroll = curw - showw
-            if x > minimum and curw - self.prompt_scroll < minimum:
-                self.prompt_scroll = curw - minimum
-            self.prompt_scroll = max(0, self.prompt_scroll)
-            start, used = 0, 0
-            for match in GRAPHEME.finditer(self.prompt.text):
-                if used >= self.prompt_scroll:
-                    break
-                used += self.cells(display(match.group()))
-                start = match.end()
-            self.prompt_scroll = used
-            put(height, label + clip(self.prompt.text[start:], showw, self.cells))
-            cursor = (height, labw + max(0, curw - used) + 1)
-        if cursor and (editor_mode or self.mode == 'prompt'):
-            row, column = cursor
-            output.append(f'\x1b[{min(height, row)};{min(cols, column)}H\x1b[?25h')
-        self.process.stdout.write(''.join(output))
-        self.redraw = False
-
-    def marquee_active(self):
-        layout = self.layout()
-        if self.cells(display(self.status)) > layout.cols:
-            return True
-        if self.file:
-            title = self.editor_title()
-        else:
-            title = f' sshfm  /{self.path.lstrip("/")}   [{self.ip}]   ol 0/{len(self.service.sessions)}'
-            entry = self.selected_entry()
-            if entry and self.cells(display(entry['name'] + ('/' if entry['kind'] == 'dir' else ''))) > layout.widths(layout.groups[0])[0]:
-                return True
-        return self.cells(display(title)) > layout.cols
-
-    def format_time(self, stamp):
-        if stamp <= 0:
-            return '-'
-        return (datetime.fromtimestamp(stamp / 1e9, timezone.utc) +
-                timedelta(hours=self.time_offset)).strftime('%Y-%m-%d %H:%M')
-
     async def startup_flash(self):
         if getattr(self.process.stdout, 'limited', False):
             return
@@ -663,10 +468,17 @@ class TUI:
             last_tick = time.monotonic()
             while self.running:
                 await self.refresh()
+                banner = self.config.settings.banner if self.config else ''
+                if banner != self.banner:
+                    self.banner = banner
+                    self.banner_scroll = 0
+                    self.redraw = True
+                    last_tick = time.monotonic()
                 if time.monotonic() - last_tick >= .1 and self.marquee_active():
                     self.scroll += 1
                     self.name_scroll += 1
                     self.msg_scroll += 1
+                    self.banner_scroll += 1
                     self.redraw = True
                     last_tick = time.monotonic()
                 if (self.redraw or self.last_size != self.size()) and getattr(self.process.stdout, 'ready', True):

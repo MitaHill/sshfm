@@ -114,7 +114,7 @@ async def handle_client(process, service, timezone, access):
     limited = Process(process, output)
 
     async def serve():
-        await run_client(limited, service, timezone)
+        await run_client(limited, service, timezone, access.config)
         await output.drain()
         process.exit(limited.exit_status)
 
@@ -134,7 +134,7 @@ async def handle_client(process, service, timezone, access):
         await asyncio.gather(closed, return_exceptions=True)
 
 
-async def run_client(process, service, timezone=0):
+async def run_client(process, service, timezone=0, config=None):
     owner = str(id(process))
     actor = process.get_extra_info('peername')[0]
     async def run(line):
@@ -156,7 +156,7 @@ async def run_client(process, service, timezone=0):
             process.exit(await run(process.command))
             return
         if process.get_terminal_type() is not None:
-            await TUI(process, service, timezone).run()
+            await TUI(process, service, timezone, config).run()
             process.exit(0)
             return
         process.stdout.write(HELP)

@@ -3,6 +3,7 @@
 import fcntl
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -63,6 +64,86 @@ class Client:
             self.proc.kill()
         self.proc.wait(timeout=5)
         os.close(self.master)
+
+
+def run_banner_checks(ssh_args, container):
+    baseline = 'send_rate_per_ip: 0\nmax_connections_per_ip: 3\n'
+
+    def configure(value):
+        container('python', '-c',
+                  'import sys; from pathlib import Path; '
+                  "p=Path('/data/config.tmp'); p.write_text(sys.argv[1]); "
+                  "p.replace('/data/config.yaml')", baseline + value)
+
+    def headers(client):
+        client.drain()
+        return re.findall(rb'\x1b\[1;1H\x1b\[0m\x1b\[K\x1b\[7m(.*?)\x1b\[0m',
+                          client.output)
+
+    def wait_header(client, predicate):
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            tops = headers(client)
+            if tops and predicate(tops[-1]):
+                return tops[-1]
+            time.sleep(.05)
+        raise AssertionError(f'Banner header did not update: {client.output[-1000:]!r}')
+
+    alice, bob = Client(ssh_args), None
+    try:
+        bob = Client(ssh_args)
+        for client in (alice, bob):
+            client.send('')
+        configure('banner: "公告 👩‍💻"\n')
+        for client in (alice, bob):
+            client.wait('公告 👩‍💻')
+            top = headers(client)[-1].decode()
+            assert 'ol 2/2' in top, top
+            assert top.endswith('公告 👩‍💻'), top
+        print('PASS: banner watcher updates two idle SSH PTYs, right aligned after ol', flush=True)
+
+        configure('banner: false\n')
+        time.sleep(1.3)
+        for client in (alice, bob):
+            client.send('r')
+            client.wait('公告 👩‍💻')
+
+        alice.send('')
+        configure('banner: "SCROLL-START-' + '中文 👩‍💻é ' * 6 + '-SCROLL-END"\n')
+        alice.wait('SCROLL-START')
+        alice.wait('SCROLL-END')
+        tops = headers(alice)
+        assert len(set(tops)) > 2
+        assert all(b'ol 2/2' in top for top in tops), tops
+        alice.resize(40, 12)
+        alice.wait('^B:bel-all')
+        alice.wait('SCROLL-END')
+        # Every header frame remains a single row, including after resize.
+        for top in headers(alice):
+            assert b'\n' not in top and b'\r' not in top
+        alice.resize(90, 24)
+        alice.wait('ol 2/2')
+        print('PASS: invalid banner retains previous value; long Unicode banner scrolls and resizes', flush=True)
+
+        for client in (alice, bob):
+            client.send('')
+        configure('banner: "RESET"\n')
+        for client in (alice, bob):
+            top = wait_header(client, lambda top: top.endswith(b'RESET'))
+            assert b'ol 2/2' in top, top
+
+        for client in (alice, bob):
+            client.send('')
+        configure('banner: ""\n')
+        for client in (alice, bob):
+            wait_header(client, lambda top: top.rstrip().endswith(b'ol 2/2'))
+        print('PASS: replacing and clearing banner updates idle sessions and restores original header', flush=True)
+    finally:
+        alice.close()
+        if bob:
+            bob.close()
+        configure('banner: ""\n')
+        time.sleep(1.3)
 
 
 def run_tui_checks(ssh_args, command, container):

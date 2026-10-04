@@ -12,7 +12,7 @@ import yaml
 
 DEFAULTS = dict(database='sshfm.sqlite3', host_key='sshfm_hostkey', host='0.0.0.0',
                 port=2222, time=0, blacklist=[], send_rate_per_ip='2KB',
-                max_connections_per_ip=3)
+                max_connections_per_ip=3, banner='')
 STARTUP = ('database', 'host_key', 'host', 'port', 'time')
 
 
@@ -60,6 +60,7 @@ class Settings:
     blacklist: tuple
     send_rate_per_ip: int
     max_connections_per_ip: int
+    banner: str = ''
 
     @classmethod
     def parse(cls, raw, directory):
@@ -72,6 +73,8 @@ class Settings:
         if values.keys() - DEFAULTS.keys():
             raise ConfigError('unknown configuration key')
         values = DEFAULTS | values
+        if not isinstance(values['banner'], str):
+            raise ConfigError('banner must be a string')
         for name in ('database', 'host_key', 'host'):
             if not isinstance(values[name], str) or not values[name].strip():
                 raise ConfigError(f'invalid {name}')
@@ -134,7 +137,7 @@ class Config:
         if any(getattr(settings, name) != getattr(self.settings, name) for name in STARTUP):
             logging.warning('Startup settings in %s changed; restart to apply them', self.path)
         self.settings, self.raw, self.error = settings, raw, None
-        logging.info('Reloaded access and traffic rules from %s', self.path)
+        logging.info('Reloaded live settings from %s', self.path)
         return True
 
     async def watch(self):

@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 
-from tui_checks import run_tui_checks
+from tui_checks import run_banner_checks, run_tui_checks
 from access_checks import run_access_checks
 
 
@@ -112,6 +112,7 @@ def run(image):
             assert '你好.txt' in shell.stdout, shell.stdout
             print('PASS: non-PTY command shell', flush=True)
 
+            run_banner_checks(ssh_args, lambda *args: docker('exec', name, *args))
             run_tui_checks(ssh_args, command, lambda *args: docker('exec', name, *args))
             run_access_checks(ssh_args, command, lambda *args: docker('exec', name, *args))
 

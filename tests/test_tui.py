@@ -1,10 +1,72 @@
 import unittest
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from sshfm.editor import Editor
 from sshfm.service import Service
 from sshfm.tui import TUI
+
+
+class BannerTests(unittest.TestCase):
+    def setUp(self):
+        self.frames = []
+        process = SimpleNamespace(get_extra_info=lambda _: ('127.0.0.1', 1),
+                                  get_terminal_size=lambda: (90, 24, 0, 0),
+                                  stdout=SimpleNamespace(write=self.frames.append))
+        self.config = SimpleNamespace(settings=SimpleNamespace(banner='公告 👩‍💻'))
+        self.service = SimpleNamespace(sessions={}, locks={})
+        self.ui = TUI(process, self.service, config=self.config)
+        self.service.sessions[self.ui.owner] = self.ui
+
+    def top(self):
+        self.ui.render()
+        return re.search(r'\x1b\[1;1H\x1b\[0m\x1b\[K\x1b\[7m(.*?)\x1b\[0m',
+                         self.frames[-1]).group(1)
+
+    def test_short_banner_is_right_aligned_after_online_count(self):
+        top = self.top()
+        self.assertTrue(top.endswith('公告 👩‍💻'))
+        self.assertIn('ol 1/1  ', top)
+        self.assertEqual(self.ui.cells(top), 90)
+        self.assertFalse(self.ui.marquee_active())
+
+    def test_empty_banner_preserves_header_and_editor_title(self):
+        self.ui.banner = ''
+        self.assertEqual(self.top().rstrip(), ' sshfm  /   [127.0.0.1]   ol 1/1')
+        self.ui.banner = '公告'
+        self.ui.file = dict(id=2, path='/file')
+        top = self.top()
+        self.assertIn('edit: file', top)
+        self.assertNotIn('公告', top)
+
+    def test_long_banner_scrolls_without_moving_title(self):
+        self.ui.banner = '公告 👩‍💻é🇹🇼' * 30
+        title, width, _ = self.ui.header()
+        first = self.top()
+        self.assertTrue(self.ui.marquee_active())
+        self.ui.banner_scroll = 2
+        second = self.top()
+        self.assertNotEqual(first, second)
+        self.assertEqual(first[:len(title)], second[:len(title)])
+        self.assertEqual(self.ui.cells(first), 90)
+        self.assertEqual(self.ui.cells(second), 90)
+        self.assertLess(width, 90)
+
+    def test_resize_and_long_path_keep_banner_within_header(self):
+        self.ui.banner = '中👩‍💻é🇹🇼' * 30
+        self.ui.path = '/' + 'long-path/' * 10
+        for cols in (12, 40, 90, 120):
+            self.ui.process.get_terminal_size = lambda: (cols, 24, 0, 0)
+            for offset in (0, 1, 9, 999):
+                with self.subTest(cols=cols, offset=offset):
+                    self.ui.banner_scroll = offset
+                    self.assertEqual(self.ui.cells(self.top()), cols)
+                    self.assertGreater(self.ui.header()[2], 0)
+
+    def test_banner_controls_are_rendered_as_text(self):
+        self.ui.banner = '\x1b[2J\nhello'
+        self.assertTrue(self.top().endswith('^[[2J^Jhello'))
 
 
 class MouseTests(unittest.IsolatedAsyncioTestCase):

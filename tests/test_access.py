@@ -32,9 +32,23 @@ class ConfigTests(unittest.IsolatedAsyncioTestCase):
         for text in ('[]', 'blacklist: [123]', 'blacklist: [not-an-ip]', 'unknown: true',
                      'send_rate_per_ip: -1', 'send_rate_per_ip: true',
                      'max_connections_per_ip: 1.5', 'port: 65536', 'time: 24',
-                     'port: 2222\nport: 2223', 'database: null'):
+                     'port: 2222\nport: 2223', 'database: null',
+                     'banner: null', 'banner: 123', 'banner: []'):
             with self.subTest(text=text), self.assertRaises(ConfigError):
                 Settings.parse(text, self.path.parent)
+
+    async def test_banner_reload_update_clear_and_invalid_value(self):
+        self.assertEqual(self.config.settings.banner, '')
+        self.path.write_text('banner: "公告 👩‍💻"\n')
+        self.assertTrue(await self.config.reload())
+        self.assertEqual(self.config.settings.banner, '公告 👩‍💻')
+        self.path.write_text('banner: false\n')
+        with self.assertLogs(level='ERROR'):
+            self.assertFalse(await self.config.reload())
+        self.assertEqual(self.config.settings.banner, '公告 👩‍💻')
+        self.path.write_text('banner: ""\n')
+        self.assertTrue(await self.config.reload())
+        self.assertEqual(self.config.settings.banner, '')
 
     async def test_bad_reload_and_missing_file_retain_rules_then_recover(self):
         self.path.write_text('blacklist: [192.0.2.0/24, "2001:db8::/32"]\nsend_rate_per_ip: 1KB/s\n')

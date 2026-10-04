@@ -29,11 +29,13 @@ docker cp config.yaml sshfm-python:/data/config.yaml
 以下规则每秒自动重载；配置错误时保留上一次有效规则：
 
 ```yaml
+banner: ''
 blacklist: []
 send_rate_per_ip: 2KB
 max_connections_per_ip: 3
 ```
 
+- `banner`：文件列表顶栏 `ol` 右侧的公告，短文本靠右，长文本循环滚动；支持中文和 emoji。空字符串隐藏，已有会话无需重连。
 - `blacklist`：IP 或 CIDR 网段，支持 IPv4/IPv6；只拒绝新连接。
 - `send_rate_per_ip`：同一 IP 的所有会话共享发送速率。`1KB` = 1024 字节/秒，也可填整数；`0` 不限速。已有会话同步生效，低速下重绘会变慢。
 - `max_connections_per_ip`：同时在线的连接数和会话数上限，默认允许 3 个，第 4 个拒绝；断开后恢复额度，`0` 不限制。已有连接保留。
