@@ -58,6 +58,7 @@ class TUI:
         self.keys = deque()
         self.parser = Vt100Parser(self.keys.append)
         self.cells = CellWidth()
+        self.last_click = None
 
     @property
     def dirty(self):
@@ -214,7 +215,6 @@ class TUI:
             self.editor.goto(max(1, min(self.editor.text.count('\n') + 1, number)))
         elif action == 'broadcast':
             self.service.broadcast(self.owner, value)
-            self.status = 'broadcast sent'
         await self.refresh(force=True)
 
     async def open_file(self, entry_id):
@@ -269,6 +269,9 @@ class TUI:
         data = event.data
         key = {'c-m': 'enter', 'c-j': 'enter', 'c-h': 'backspace',
                'c-i': 'tab'}.get(key, key)
+        if key == 'vt100-mouse-event':
+            await self.handle_mouse(data)
+            return
         if key == 'cpr-response':
             response = re.fullmatch(r'\x1b\[(\d+);(\d+)R', data)
             if response:
@@ -277,6 +280,7 @@ class TUI:
                     attribute = {1: 'vs16', 2: 'zwj', 3: 'flags'}[row]
                     setattr(self.cells, attribute, column == 3)
             return
+        self.last_click = None
         if self.mode == 'prompt':
             if key == 'escape':
                 self.cancel_prompt()
@@ -389,6 +393,95 @@ class TUI:
         elif data == 'q':
             self.running = False
 
+    def place_cursor(self, editor, start, end, column):
+        editor.pos, used = start, 0
+        for match in GRAPHEME.finditer(editor.text[start:end]):
+            amount = self.cells(display(match.group()))
+            if used + amount > column:
+                break
+            used += amount
+            editor.pos = start + match.end()
+        editor.goal = None
+
+    async def handle_mouse(self, data):
+        match = re.fullmatch(r'\x1b\[<(\d+);(\d+);(\d+)([Mm])', data)
+        if match:
+            button, column, row = map(int, match.groups()[:3])
+            released = match[4] == 'm'
+        elif data.startswith('\x1b[M') and len(data) == 6:
+            button, column, row = (ord(c) - 32 for c in data[3:])
+            released = button & 3 == 3
+        else:
+            return
+        cols, rows = self.size()
+        if released or button & 32 or not (1 <= column <= cols and 1 <= row <= rows):
+            return
+        layout = self.layout()
+        # Modifiers use bits 2–4; ignore them when identifying the button.
+        button &= ~28
+        if self.mode == 'prompt':
+            if button == 0 and row == rows:
+                self.place_cursor(self.prompt, 0, len(self.prompt.text),
+                                  max(0, column - 1 - self.cells(self.prompt_label) +
+                                      self.prompt_scroll))
+            return
+        if not layout.top <= row <= layout.bottom:
+            return
+        if button in (64, 65):
+            self.last_click = None
+            delta = -3 if button == 64 else 3
+            if self.mode == 'editor':
+                width, height, _ = self.metrics()
+                visual = self.editor.rows(width, self.cells)
+                crow, ccol = self.editor.cursor(visual, self.cells)
+                self.editor_top = max(0, min(max(0, len(visual) - height),
+                                             self.editor_top + delta))
+                target = max(self.editor_top, min(crow, self.editor_top + height - 1))
+                if target != crow:
+                    line = visual[target]
+                    self.place_cursor(self.editor, line.start, line.end, ccol)
+            else:
+                self.top = max(0, min(max(0, len(self.entries) - layout.visible),
+                                     self.top + delta))
+                self.selected = max(self.top, min(self.selected,
+                                                  self.top + layout.visible - 1))
+            return
+        if button != 0 or column == layout.cols:
+            return
+        if self.mode == 'editor':
+            width, _, numw = self.metrics()
+            visual = self.editor.rows(width, self.cells)
+            index = self.editor_top + row - layout.top
+            if index < len(visual):
+                line = visual[index]
+                self.place_cursor(self.editor, line.start, line.end,
+                                  max(0, column - numw - 1))
+        else:
+            index = self.top + (row - layout.top) // len(layout.groups)
+            if index >= len(self.entries):
+                self.last_click = None
+                return
+            entry = self.entries[index]
+            now = time.monotonic()
+            click = (self.cwd_id, entry['id'], column, row)
+            double = (self.last_click is not None and self.last_click[0] == click and
+                      now - self.last_click[1] <= .4)
+            self.selected = index
+            self.name_scroll = 0
+            self.last_click = None if double else (click, now)
+            if double:
+                await self.handle_key(KeyPress(Keys.ControlM, '\r'))
+
+    def editor_title(self):
+        line = self.editor.text.count('\n', 0, self.editor.pos) + 1
+        total = self.editor.text.count('\n') + 1
+        title = f' edit: {self.file["path"].lstrip("/")}   line {line}/{total}'
+        owner = self.service.locks.get(self.file['id'])
+        session = self.service.sessions.get(owner)
+        if session is not None:
+            title += f'   locked by {session.ip}'
+        return title
+
     def render(self):
         layout = self.layout()
         cols, height = layout.cols, layout.rows
@@ -407,8 +500,7 @@ class TUI:
                           shown + '\x1b[0m')
 
         here = sum(ui.cwd_id == self.cwd_id for ui in self.service.sessions.values())
-        line_number = self.editor.text.count('\n', 0, self.editor.pos) + 1
-        title = (f' edit: {self.file["path"].lstrip("/")}   line {line_number}/{self.editor.text.count(chr(10)) + 1}'
+        title = (self.editor_title()
                  if editor_mode else f' sshfm  /{self.path.lstrip("/")}   [{self.ip}]   ol {here}/{len(self.service.sessions)}')
         put(1, marquee(title, self.scroll, cols, self.cells), True)
         total, first, count = 0, 0, layout.height
@@ -529,7 +621,7 @@ class TUI:
         if self.cells(display(self.status)) > layout.cols:
             return True
         if self.file:
-            title = f' edit: {self.file["path"].lstrip("/")}   line {self.editor.text.count(chr(10), 0, self.editor.pos) + 1}/{self.editor.text.count(chr(10)) + 1}'
+            title = self.editor_title()
         else:
             title = f' sshfm  /{self.path.lstrip("/")}   [{self.ip}]   ol 0/{len(self.service.sessions)}'
             entry = self.selected_entry()
@@ -541,9 +633,11 @@ class TUI:
         if stamp <= 0:
             return '-'
         return (datetime.fromtimestamp(stamp / 1e9, timezone.utc) +
-                timedelta(hours=self.time_offset)).strftime('%Y%m%d%H%M')
+                timedelta(hours=self.time_offset)).strftime('%Y-%m-%d %H:%M')
 
     async def startup_flash(self):
+        if getattr(self.process.stdout, 'limited', False):
+            return
         for frame in range(8):
             cols, rows = self.size()
             reverse = frame % 2 == 0
@@ -557,7 +651,7 @@ class TUI:
 
     async def run(self):
         self.service.register(self.owner, self)
-        self.process.stdout.write('\x1b[?1049h\x1b[?2004h\x1b[2J')
+        self.process.stdout.write('\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[2J')
         reader = None
         try:
             await self.startup_flash()
@@ -575,7 +669,7 @@ class TUI:
                     self.msg_scroll += 1
                     self.redraw = True
                     last_tick = time.monotonic()
-                if self.redraw or self.last_size != self.size():
+                if (self.redraw or self.last_size != self.size()) and getattr(self.process.stdout, 'ready', True):
                     self.render()
                 ready, _ = await asyncio.wait([reader], timeout=0.1)
                 if not ready:
@@ -612,10 +706,10 @@ class TUI:
                         self.status = 'save failed' if self.file else 'database operation failed'
                     self.redraw = True
         finally:
+            self.service.disconnect(self.owner)
             if reader:
                 reader.cancel()
                 await asyncio.gather(reader, return_exceptions=True)
-            self.service.disconnect(self.owner)
             if not self.process.stdout.is_closing():
-                self.process.stdout.write('\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l'
+                self.process.stdout.write('\x1b[0m\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l'
                                           'Disconnect from sshfm.\r\nSee you.\r\n')

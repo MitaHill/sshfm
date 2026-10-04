@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from sshfm.collation import name_key
 from sshfm.editor import CellWidth, Editor
@@ -8,7 +9,8 @@ from sshfm.layout import Layout, marquee, size_text
 
 
 class UpstreamLayoutTests(unittest.TestCase):
-    def test_upstream_cpp_layout_at_six_terminal_sizes(self):
+    @patch('sshfm.layout.CELL_MIN', (18, 6, 12, 12, 15, 15))
+    def test_upstream_layout_algorithm_with_original_column_widths(self):
         fixtures = json.loads(Path(__file__).with_name('upstream_layout.json').read_text())
         for case in fixtures['cases']:
             with self.subTest(cols=case['cols'], rows=case['rows'], editor=case['editor'], prompt=case['prompt']):
@@ -23,9 +25,26 @@ class UpstreamLayoutTests(unittest.TestCase):
         self.assertEqual(sorted(names, key=name_key), ['a', '啊', '按', 'b', '波', 'z', '中'])
         self.assertLess(name_key('a'), name_key('aa'))
 
-    def test_upstream_size_and_exact_width_editor_end(self):
-        self.assertEqual(size_text(999999, 6), '999999')
-        self.assertEqual(size_text(1000000, 6), '977K')
+    def test_human_readable_sizes(self):
+        for size, expected in ((0, '0 B'), (3, '3 B'), (1023, '1023 B'),
+                               (1024, '1.0 KiB'), (1536, '1.5 KiB'),
+                               (999999, '976.6 KiB'), (1024 ** 2 - 1, '1.0 MiB'),
+                               (1024 ** 3, '1.0 GiB')):
+            self.assertEqual(size_text(size, 10), expected)
+            self.assertLessEqual(len(size_text(size, 8)), 8)
+
+    def test_human_readable_columns_fit_without_clipping(self):
+        for cols in (40, 90, 120):
+            layout = Layout(cols, 30, False, False, CellWidth())
+            for group in layout.groups:
+                widths = layout.widths(group)
+                for column in group:
+                    if column in (2, 3):
+                        self.assertGreaterEqual(widths[column], 16)
+                    if column == 1:
+                        self.assertGreaterEqual(widths[column], 8)
+
+    def test_exact_width_editor_end(self):
         editor = Editor('abcd')
         editor.pos = 4
         self.assertEqual(len(editor.rows(4)), 1)

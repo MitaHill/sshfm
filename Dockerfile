@@ -6,7 +6,7 @@ COPY pyproject.toml ./
 RUN python -c "import subprocess, tomllib; subprocess.check_call(['python', '-m', 'pip', 'install', '--no-cache-dir', *tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']])" \
     && useradd --uid 10001 --create-home sshfm \
     && mkdir /data && chown sshfm:sshfm /data
-COPY README.md ./
+COPY README.md config.yaml ./
 COPY src ./src
 RUN pip install --no-cache-dir --no-deps .
 COPY tests ./tests

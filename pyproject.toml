@@ -9,6 +9,7 @@ description = "SSH terminal file manager and editor with a SQLite virtual filesy
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "PyYAML==6.0.3",
     "asyncssh==2.24.0",
     "prompt_toolkit==3.0.53",
     "regex==2026.9.29",

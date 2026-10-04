@@ -12,6 +12,7 @@ import time
 import uuid
 
 from tui_checks import run_tui_checks
+from access_checks import run_access_checks
 
 
 def docker(*args):
@@ -66,6 +67,11 @@ def run(image):
             return json.loads(result.stdout if ok else result.stderr)
 
         try:
+            # Existing UI regression checks run without pacing; rate and admission
+            # rules are exercised separately by the real-SSH tests in test_access.
+            docker('run', '--rm', '-v', volume + ':/data', image, 'python', '-c',
+                   "from pathlib import Path; Path('/data/config.yaml').write_text("
+                   "'send_rate_per_ip: 0\\nmax_connections_per_ip: 3\\n')")
             host_key = start()
             command('mkdir', '/notes')
             initial = command('write', '/notes/你好.txt', '中文 👩‍💻\né')
@@ -107,6 +113,7 @@ def run(image):
             print('PASS: non-PTY command shell', flush=True)
 
             run_tui_checks(ssh_args, command, lambda *args: docker('exec', name, *args))
+            run_access_checks(ssh_args, command, lambda *args: docker('exec', name, *args))
 
             docker('stop', '-t', '5', name)
             docker('rm', name)

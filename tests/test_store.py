@@ -4,8 +4,6 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-import zlib
-
 from sshfm.store import Store, StoreError
 
 
@@ -116,41 +114,37 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
         self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
 
-    def test_content_is_compressed_by_default_and_size_is_uncompressed(self):
-        text = '中文 👩‍💻\n' * 1000
-        file = self.store.create('/compressed', 'file', text, '127.0.0.1')
+    def test_plain_text_storage_metadata_and_utf8_size(self):
+        text = '中文 👩‍💻\n\x00tail'
+        file = self.store.create('/plain', 'file', text, '127.0.0.1')
         with sqlite3.connect(self.database) as db:
-            blob, codec, raw_size = db.execute(
-                "SELECT content, codec, raw_size FROM entries WHERE id = ?", (file['id'],)).fetchone()
-        self.assertEqual(codec, 'zlib')
-        self.assertIsInstance(blob, bytes)
-        self.assertEqual(zlib.decompress(blob).decode(), text)
-        self.assertLess(len(blob), len(text.encode()) // 10)
-        self.assertEqual(raw_size, file['size'])
-        self.assertEqual(file['creator_ip'], '127.0.0.1')
+            content, kind = db.execute(
+                "SELECT content, typeof(content) FROM entries WHERE id = ?", (file['id'],)).fetchone()
+            columns = {row[1] for row in db.execute('PRAGMA table_info(entries)')}
+        self.assertEqual((content, kind), (text, 'text'))
+        self.assertTrue({'codec', 'raw_size'}.isdisjoint(columns))
+        self.assertEqual(file['size'], len(text.encode()))
+        self.assertNotIn('content', self.store.ls()[0])
+        self.assertNotIn('content', self.store.view(1)['entries'][0])
         self.store.save(file['id'], 1, text + 'end', '127.0.0.2')
-        saved = self.store.read('/compressed')
+        saved = self.store.read('/plain')
         self.assertEqual(saved['content'], text + 'end')
+        self.assertEqual(saved['size'], len((text + 'end').encode()))
         self.assertEqual(saved['editor_ip'], '127.0.0.2')
         self.assertEqual(saved['creator_ip'], '127.0.0.1')
+        with self.assertRaises(StoreError):
+            self.store.save(file['id'], saved['revision'], b'not text')
+        self.assertEqual(self.store.read('/plain'), saved)
 
-    def test_initial_text_database_upgrade_preserves_identity_revision_and_dates(self):
+    def test_legacy_compressed_database_is_rejected_without_changing_it(self):
         legacy = Path(self.temp.name) / 'legacy.sqlite3'
         with sqlite3.connect(legacy) as db:
-            db.execute("CREATE TABLE entries(id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                       "parent_id INTEGER REFERENCES entries(id) ON DELETE CASCADE, name TEXT, "
-                       "kind TEXT, content TEXT, revision INTEGER DEFAULT 1, "
-                       "created_at INTEGER, updated_at INTEGER, UNIQUE(parent_id, name))")
-            db.execute("INSERT INTO entries VALUES(1,NULL,'','dir',NULL,1,10,10)")
-            db.execute("INSERT INTO entries VALUES(7,1,'file','file',?,3,11,12)", ('中文 👩‍💻',))
-        upgraded = Store(legacy)
-        row = upgraded.read('/file')
-        self.assertEqual((row['id'], row['revision'], row['created_at'], row['updated_at']), (7, 3, 11, 12))
-        self.assertEqual(row['content'], '中文 👩‍💻')
-        self.assertEqual(Store(legacy).read('/file'), row)
-        with sqlite3.connect(legacy) as db:
-            self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
-            self.assertIsInstance(db.execute('SELECT content FROM entries WHERE id=7').fetchone()[0], bytes)
+            db.execute("CREATE TABLE entries(id INTEGER PRIMARY KEY, content BLOB, codec TEXT)")
+            db.execute("INSERT INTO entries VALUES(7,?, 'zlib')", (b'legacy compressed bytes',))
+        original = legacy.read_bytes()
+        with self.assertRaisesRegex(StoreError, 'legacy compressed database'):
+            Store(legacy)
+        self.assertEqual(legacy.read_bytes(), original)
 
 
 if __name__ == '__main__':

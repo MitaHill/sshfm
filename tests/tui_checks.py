@@ -24,6 +24,7 @@ class Client:
         self.output = b''
         self.wait('sshfm')
         self.wait('q:quit')
+        assert b'\x1b[?1000h\x1b[?1006h' in self.output
 
     def drain(self):
         while select.select([self.master], [], [], 0)[0]:
@@ -74,7 +75,8 @@ def run_tui_checks(ssh_args, command, container):
         alice.send('ndoc\r')
         alice.wait('created doc')
         file = command('read', '/tui/doc')
-        alice.send('\r')
+        # At 90 columns the readable metadata wraps; entries start at row 4.
+        alice.send('\x1b[<0;2;4M\x1b[<0;2;4m\x1b[<0;2;4M')
         alice.wait('edit: tui/doc')
         bob = Client(ssh_args)
         bob.send('g/tui/doc\r')
@@ -84,14 +86,26 @@ def run_tui_checks(ssh_args, command, container):
         text = '中文 👩‍💻\né flag 🇹🇼\nlast'
         alice.send('\x1b[200~' + text + '\x1b[201~')
         alice.wait('last')
+        alice.wait('locked by ')
+        bob.wait('locked by ')
         bob.send('X')
         bob.wait('file is being edited')
         assert 'being edited' in command('save', file['id'], 1, 'bypass', ok=False)['error']
         alice.send('\x13')
         alice.wait('saved')
         bob.wait('last')
+        assert b'locked by ' not in bob.output[bob.output.rfind(b'\x1b[1;1H'):]
+        assert command('read', '/tui/doc')['content'] == text
+        alice.send('\x1b[<0;7;2M\x1b[<0;7;2m')
+        alice.wait('line 1/3')
+        alice.send('X\x13')
+        alice.wait('saved')
+        assert command('read', '/tui/doc')['content'] == '中X文 👩‍💻\né flag 🇹🇼\nlast'
+        alice.send('\x7f\x13')
+        alice.wait('saved')
         assert command('read', '/tui/doc')['content'] == text
         print('PASS: TUI create/open, multiline paste, shared viewers, first-change lock and reload', flush=True)
+        print('PASS: real SSH SGR double-click open, editor cell positioning and release without text insertion', flush=True)
 
         # Ctrl-G uses logical lines; Backspace removes a complete flag grapheme.
         alice.send('\x07' + '2\r\x1b[F\x7f')
@@ -190,7 +204,8 @@ def run_tui_checks(ssh_args, command, container):
         alice.wait('deleted')
         assert command('ls', '/tui/renamed') == []
         alice.send('Btest broadcast\r')
-        alice.wait('broadcast sent')
+        alice.wait('] test broadcast')
+        assert b'broadcast sent' not in alice.output
         alice.send('b')
         alice.wait(b'\a')
         alice.send('\x1b')
@@ -200,6 +215,7 @@ def run_tui_checks(ssh_args, command, container):
         alice.wait('sshfm  /  ')
         alice.send('q')
         alice.wait(b'\x1b[?1049l')
+        assert b'\x1b[?1000l\x1b[?1006l' in alice.output
         assert alice.proc.wait(timeout=5) == 0
         print('PASS: TUI resize, tiny-terminal recovery, original confirmation, deleted-directory fallback and clean exit', flush=True)
     finally:

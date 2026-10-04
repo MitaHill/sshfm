@@ -14,6 +14,8 @@ import asyncssh
 from .store import Store, StoreError
 from .service import Service
 from .tui import TUI
+from .access import Access, Output, Process
+from .config import Config, ConfigError
 
 
 HELP = """sshfm Python/SQLite. All paths are relative to virtual root.
@@ -59,17 +61,85 @@ async def execute(service, line, owner, actor=''):
     raise StoreError("unknown command or wrong arguments; use help")
 
 
-class LocalTestServer(asyncssh.SSHServer):
+class Session(asyncssh.SSHServerProcess):
+    def __init__(self, server):
+        super().__init__(lambda process: handle_client(process, server.service,
+                                                      server.timezone, server.access),
+                         sftp_factory=None, sftp_version=3, allow_scp=False)
+        self.server = server
+        self.released = False
+
+    def connection_lost(self, exc):
+        try:
+            super().connection_lost(exc)
+        finally:
+            if not self.released:
+                self.server.access.release(self.server.ip, session=True)
+                self.released = True
+
+
+class Server(asyncssh.SSHServer):
+    def __init__(self, access, service, timezone):
+        self.access, self.service, self.timezone = access, service, timezone
+        self.admitted = False
+
+    def connection_made(self, connection):
+        self.ip = connection.get_extra_info('peername')[0]
+        self.admitted = self.access.acquire(self.ip)
+        if not self.admitted:
+            logging.info('Rejected SSH connection from %s: blacklist or connection limit', self.ip)
+            connection.abort()
+
+    def connection_lost(self, exc):
+        if self.admitted:
+            self.access.release(self.ip)
+            self.admitted = False
+
+    def session_requested(self):
+        if not self.admitted or not self.access.acquire(self.ip, session=True):
+            raise asyncssh.ChannelOpenError(asyncssh.OPEN_ADMINISTRATIVELY_PROHIBITED,
+                                           'IP session limit reached')
+        return Session(self)
+
     def begin_auth(self, username):
         # Local prototype: deliberately accepts any username, as the C++ version does.
         return False
 
 
-async def handle_client(process, service, timezone=0):
+async def handle_client(process, service, timezone, access):
+    peer = process.get_extra_info('peername')
+    if peer is None:
+        return
+    output = Output(access.budget(peer[0]))
+    limited = Process(process, output)
+
+    async def serve():
+        await run_client(limited, service, timezone)
+        await output.drain()
+        process.exit(limited.exit_status)
+
+    handler = asyncio.create_task(serve())
+    closed = asyncio.create_task(process.wait_closed())
+    try:
+        done, _ = await asyncio.wait([handler, closed], return_when=asyncio.FIRST_COMPLETED)
+        if handler in done:
+            await handler
+    except (asyncssh.ConnectionLost, BrokenPipeError):
+        pass
+    finally:
+        handler.cancel()
+        await asyncio.gather(handler, return_exceptions=True)
+        await output.close()
+        closed.cancel()
+        await asyncio.gather(closed, return_exceptions=True)
+
+
+async def run_client(process, service, timezone=0):
     owner = str(id(process))
+    actor = process.get_extra_info('peername')[0]
     async def run(line):
         try:
-            result = await execute(service, line, owner, process.get_extra_info('peername')[0])
+            result = await execute(service, line, owner, actor)
             if result is not None:
                 process.stdout.write(json.dumps(result, ensure_ascii=False) + '\n')
             return 0
@@ -91,11 +161,13 @@ async def handle_client(process, service, timezone=0):
             return
         process.stdout.write(HELP)
         process.stdout.write('sshfm> ')
+        await process.stdout.drain()
         async for line in process.stdin:
             if line.strip() == 'exit':
                 break
             await run(line)
             process.stdout.write('sshfm> ')
+            await process.stdout.drain()
         process.exit(0)
     except (asyncssh.ConnectionLost, asyncssh.BreakReceived, BrokenPipeError):
         pass
@@ -104,6 +176,13 @@ async def handle_client(process, service, timezone=0):
 
 
 async def main(args):
+    path = args.config or str(Path(args.database or '/data/sshfm.sqlite3').parent / 'config.yaml')
+    config = Config(path)
+    settings = config.load(create=args.config is None)
+    for name in ('database', 'host_key', 'host', 'port', 'time'):
+        if getattr(args, name) is None:
+            setattr(args, name, getattr(settings, name))
+    access = Access(config)
     database = Path(args.database)
     database.parent.mkdir(parents=True, exist_ok=True)
     store = Store(database)
@@ -119,21 +198,29 @@ async def main(args):
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    async with await asyncssh.create_server(
-            LocalTestServer, args.host, args.port, server_host_keys=[str(key_path)],
-            process_factory=lambda process: handle_client(process, service, args.time),
-            encoding='utf-8', login_timeout=15, line_editor=False,
-            keepalive_interval=10, keepalive_count_max=3):
-        logging.info("sshfm listening on %s:%s", args.host, args.port)
-        await stop.wait()
+    watcher = asyncio.create_task(config.watch())
+    try:
+        async with await asyncssh.create_server(
+                lambda: Server(access, service, args.time), args.host, args.port,
+                server_host_keys=[str(key_path)], encoding='utf-8', login_timeout=15,
+                line_editor=False, keepalive_interval=10, keepalive_count_max=3):
+            logging.info("sshfm listening on %s:%s; config: %s", args.host, args.port, config.path)
+            await stop.wait()
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
 
 
 def cli():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--database', default='/data/sshfm.sqlite3')
-    parser.add_argument('--host-key', default='/data/sshfm_hostkey')
-    parser.add_argument('--host', default='0.0.0.0')
-    parser.add_argument('--port', type=int, default=2222)
-    parser.add_argument('--time', '-time', type=int, default=0, help='UTC offset in hours for TUI timestamps')
+    parser.add_argument('--config', help='config.yaml path (default: next to the database)')
+    parser.add_argument('--database')
+    parser.add_argument('--host-key')
+    parser.add_argument('--host')
+    parser.add_argument('--port', type=int)
+    parser.add_argument('--time', '-time', type=int, help='UTC offset in hours for TUI timestamps')
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-    asyncio.run(main(parser.parse_args()))
+    try:
+        asyncio.run(main(parser.parse_args()))
+    except (ConfigError, OSError) as exc:
+        parser.error(str(exc))

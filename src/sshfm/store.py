@@ -3,7 +3,11 @@
 from contextlib import closing, contextmanager
 import sqlite3
 import time
-import zlib
+
+
+# Lists and path traversal return metadata; file text is fetched only for reading.
+COLUMNS = """id, parent_id, name, kind, revision, created_at, updated_at,
+             creator_ip, editor_ip, coalesce(length(CAST(content AS BLOB)), 0) AS size"""
 
 
 class StoreError(Exception):
@@ -14,6 +18,8 @@ class Store:
     def __init__(self, database):
         self.database = str(database)
         with closing(sqlite3.connect(self.database)) as db:
+            if any(row[1] == 'codec' for row in db.execute("PRAGMA table_info(entries)")):
+                raise StoreError("legacy compressed database; use an offline copy or a new database")
             db.execute("PRAGMA foreign_keys=ON")
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript("""
@@ -22,9 +28,7 @@ class Store:
                     parent_id INTEGER REFERENCES entries(id) ON DELETE CASCADE,
                     name TEXT NOT NULL,
                     kind TEXT NOT NULL CHECK(kind IN ('dir', 'file')),
-                    content BLOB,
-                    codec TEXT NOT NULL DEFAULT 'zlib',
-                    raw_size INTEGER NOT NULL DEFAULT 0,
+                    content TEXT,
                     creator_ip TEXT NOT NULL DEFAULT '',
                     editor_ip TEXT NOT NULL DEFAULT '',
                     revision INTEGER NOT NULL DEFAULT 1,
@@ -32,26 +36,12 @@ class Store:
                     updated_at INTEGER NOT NULL,
                     UNIQUE(parent_id, name),
                     CHECK((kind = 'dir' AND content IS NULL) OR
-                          (kind = 'file' AND content IS NOT NULL)),
+                          (kind = 'file' AND typeof(content) = 'text')),
                     CHECK((id = 1 AND parent_id IS NULL AND name = '' AND kind = 'dir') OR
                           (id != 1 AND parent_id IS NOT NULL AND name != '' AND
                            name NOT IN ('.', '..') AND instr(name, '/') = 0))
                 );
             """)
-            columns = {row[1] for row in db.execute("PRAGMA table_info(entries)")}
-            # Upgrade the initial TEXT prototype in one transaction, without changing IDs.
-            db.execute("BEGIN IMMEDIATE")
-            for name, declaration in [('codec', "TEXT NOT NULL DEFAULT 'plain'"),
-                                      ('raw_size', 'INTEGER NOT NULL DEFAULT 0'),
-                                      ('creator_ip', "TEXT NOT NULL DEFAULT ''"),
-                                      ('editor_ip', "TEXT NOT NULL DEFAULT ''")]:
-                if name not in columns:
-                    db.execute(f"ALTER TABLE entries ADD COLUMN {name} {declaration}")
-            for entry_id, content in db.execute(
-                    "SELECT id, content FROM entries WHERE kind = 'file' AND codec = 'plain'").fetchall():
-                raw = content.encode('utf-8') if isinstance(content, str) else bytes(content)
-                db.execute("UPDATE entries SET content = ?, codec = 'zlib', raw_size = ? WHERE id = ?",
-                           (zlib.compress(raw), len(raw), entry_id))
             now = time.time_ns()
             db.execute("INSERT OR IGNORE INTO entries "
                        "(id, parent_id, name, kind, created_at, updated_at) "
@@ -96,11 +86,11 @@ class Store:
 
     @staticmethod
     def resolve(db, parts):
-        row = db.execute("SELECT * FROM entries WHERE id = 1").fetchone()
+        row = db.execute(f"SELECT {COLUMNS} FROM entries WHERE id = 1").fetchone()
         for part in parts:
             if row['kind'] != 'dir':
                 raise StoreError("parent is not a directory")
-            row = db.execute("SELECT * FROM entries WHERE parent_id = ? AND name = ?",
+            row = db.execute(f"SELECT {COLUMNS} FROM entries WHERE parent_id = ? AND name = ?",
                              (row['id'], part)).fetchone()
             if row is None:
                 raise StoreError("path not found")
@@ -114,64 +104,51 @@ class Store:
             raise StoreError("parent is not a directory")
         return row['id'], parts[-1]
 
-    @staticmethod
-    def info(row, include_content=False):
-        result = dict(row)
-        content = result.pop('content')
-        result['size'] = result.pop('raw_size')
-        codec = result.pop('codec')
-        if include_content:
-            result['content'] = (zlib.decompress(content).decode('utf-8')
-                                 if content is not None and codec == 'zlib' else content)
-        return result
-
     def stat(self, path):
         with self.connect() as db:
-            return self.info(self.resolve(db, self.parts(path)))
+            return dict(self.resolve(db, self.parts(path)))
 
     def ls(self, path='/'):
         with self.connect() as db:
             row = self.resolve(db, self.parts(path))
             if row['kind'] != 'dir':
                 raise StoreError("not a directory")
-            return [self.info(child) for child in db.execute(
-                "SELECT * FROM entries WHERE parent_id = ? ORDER BY kind, name", (row['id'],))]
+            return [dict(child) for child in db.execute(
+                f"SELECT {COLUMNS} FROM entries WHERE parent_id = ? ORDER BY kind, name", (row['id'],))]
 
     def create(self, path, kind, content=None, actor=''):
         with self.connect(write=True) as db:
             parent, name = self.parent(db, self.parts(path))
             now = time.time_ns()
             cursor = db.execute("INSERT INTO entries "
-                                "(parent_id, name, kind, content, codec, raw_size, creator_ip, editor_ip, created_at, updated_at) "
-                                "VALUES (?, ?, ?, ?, 'zlib', ?, ?, ?, ?, ?)",
-                                (parent, name, kind, zlib.compress(content.encode('utf-8'))
-                                 if content is not None else None,
-                                 len(content.encode('utf-8')) if content is not None else 0,
-                                 actor, actor, now, now))
-            return self.info(db.execute("SELECT * FROM entries WHERE id = ?",
-                                       (cursor.lastrowid,)).fetchone())
+                                "(parent_id, name, kind, content, creator_ip, editor_ip, created_at, updated_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                (parent, name, kind, content, actor, actor, now, now))
+            return dict(db.execute(f"SELECT {COLUMNS} FROM entries WHERE id = ?",
+                                   (cursor.lastrowid,)).fetchone())
 
     def read(self, path):
         with self.connect() as db:
             row = self.resolve(db, self.parts(path))
             if row['kind'] != 'file':
                 raise StoreError("not a file")
-            return self.info(row, include_content=True)
+            result = dict(row)
+            result['content'] = db.execute("SELECT content FROM entries WHERE id = ?", (row['id'],)).fetchone()[0]
+            return result
 
     def save(self, entry_id, revision, content, actor=''):
         # Stable identity prevents a stale path from overwriting a replacement file.
         with self.connect(write=True) as db:
-            row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+            row = db.execute(f"SELECT {COLUMNS} FROM entries WHERE id = ?", (entry_id,)).fetchone()
             if row is None or row['kind'] != 'file':
                 raise StoreError("file no longer exists")
             if row['revision'] != revision:
                 raise StoreError("save conflict: read the latest revision and retry")
-            db.execute("UPDATE entries SET content = ?, codec = 'zlib', raw_size = ?, revision = revision + 1, "
+            db.execute("UPDATE entries SET content = ?, revision = revision + 1, "
                        "updated_at = ?, editor_ip = ? WHERE id = ?",
-                       (zlib.compress(content.encode('utf-8')), len(content.encode('utf-8')),
-                        time.time_ns(), actor, entry_id))
-            return self.info(db.execute("SELECT * FROM entries WHERE id = ?",
-                                       (entry_id,)).fetchone())
+                       (content, time.time_ns(), actor, entry_id))
+            return dict(db.execute(f"SELECT {COLUMNS} FROM entries WHERE id = ?",
+                                   (entry_id,)).fetchone())
 
     def move(self, source, destination, expected_id=None, actor=''):
         with self.connect(write=True) as db:
@@ -190,8 +167,8 @@ class Store:
                                       (ancestor,)).fetchone()['parent_id']
             db.execute("UPDATE entries SET parent_id = ?, name = ?, updated_at = ?, editor_ip = ? WHERE id = ?",
                        (parent, name, time.time_ns(), actor, row['id']))
-            return self.info(db.execute("SELECT * FROM entries WHERE id = ?",
-                                       (row['id'],)).fetchone())
+            return dict(db.execute(f"SELECT {COLUMNS} FROM entries WHERE id = ?",
+                                   (row['id'],)).fetchone())
 
     def remove(self, path, recursive=False, protected=(), expected_id=None):
         with self.connect(write=True) as db:
@@ -202,7 +179,7 @@ class Store:
             if expected_id is not None and row['id'] != expected_id:
                 raise StoreError('selected entry changed; cancel and retry')
             if not recursive and db.execute("SELECT 1 FROM entries WHERE parent_id = ?",
-                                            (row['id'],)).fetchone():
+                                        (row['id'],)).fetchone():
                 raise StoreError("directory is not empty; use rm -r")
             tree = db.execute("""WITH RECURSIVE tree AS (
                 SELECT id, parent_id FROM entries WHERE id = ?
@@ -240,29 +217,29 @@ class Store:
 
     def read_id(self, entry_id):
         with self.connect() as db:
-            row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+            row = db.execute(f"SELECT {COLUMNS}, content FROM entries WHERE id = ?", (entry_id,)).fetchone()
             if row is None or row['kind'] != 'file':
                 raise StoreError("file no longer exists")
-            result = self.info(row, include_content=True)
+            result = dict(row)
             result['path'] = self.path_for(db, entry_id)
             return result
 
     def view(self, cwd_id, file_id=None):
         """Resolve the browser and open editor together in one read snapshot."""
         with self.connect() as db:
-            row = db.execute("SELECT * FROM entries WHERE id = ?", (cwd_id,)).fetchone()
+            row = db.execute(f"SELECT {COLUMNS} FROM entries WHERE id = ?", (cwd_id,)).fetchone()
             if row is None or row['kind'] != 'dir':
                 cwd_id = 1
             result = {
                 'cwd_id': cwd_id,
                 'path': self.path_for(db, cwd_id),
-                'entries': [self.info(child) for child in db.execute(
-                    "SELECT * FROM entries WHERE parent_id = ?", (cwd_id,))],
+                'entries': [dict(child) for child in db.execute(
+                    f"SELECT {COLUMNS} FROM entries WHERE parent_id = ?", (cwd_id,))],
                 'file': None,
             }
             if file_id is not None:
-                row = db.execute("SELECT * FROM entries WHERE id = ?", (file_id,)).fetchone()
+                row = db.execute(f"SELECT {COLUMNS}, content FROM entries WHERE id = ?", (file_id,)).fetchone()
                 if row is not None:
-                    result['file'] = self.info(row, include_content=True)
+                    result['file'] = dict(row)
                     result['file']['path'] = self.path_for(db, file_id)
             return result

@@ -1,0 +1,20 @@
+# 推荐部署到数据库所在目录，例如 /data/config.yaml。
+# 路径相对于此配置文件；以下启动参数修改后需要重启。
+database: sshfm.sqlite3
+host_key: sshfm_hostkey
+host: 0.0.0.0
+port: 2222
+time: 0
+
+# 以下规则每秒自动重载；错误配置保留上一次有效规则。
+# 支持单个 IPv4/IPv6 和 CIDR 网段，只拒绝新连接。
+blacklist: []
+
+# 同一 IP 的所有终端和命令会话共享此发送额度。
+# KB/KiB = 1024 字节；也可填写整数（字节/秒），0 表示不限速。
+send_rate_per_ip: 2KB
+
+# 分别限制同一 IP 的 SSH 连接数和会话数，防止连接复用绕过限制。
+# 允许 3 个，第 4 个拒绝；已有连接不受影响，断开后自动恢复额度。
+# 0 表示不限制。
+max_connections_per_ip: 3

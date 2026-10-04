@@ -5,7 +5,7 @@ UI::layout, entry_lines, cell_widths, cyclic_window and fmt_size.
 """
 from .editor import GRAPHEME, clip, display, pad
 
-CELL_MIN = (18, 6, 12, 12, 15, 15)
+CELL_MIN = (18, 8, 16, 16, 15, 15)
 HEADERS = ('NAME', 'SIZE', 'CREATED', 'EDITED', 'CREATOR', 'EDITOR')
 BROWSER_HINTS = ('n:new', 'N:mkdir', 'm:move', 'd:delete', 'Enter:open', 'g:goto',
                  'b:bel', 'B:bcast', '^B:bel-all', 't:time', 's:name', 'r:reload',
@@ -68,10 +68,16 @@ def marquee(text, offset, width, cells):
 
 
 def size_text(size, width):
-    if len(str(size)) <= width:
-        return str(size)
-    for power, unit in enumerate(('K', 'M', 'G', 'T'), 1):
-        text = str(int(size / 1024 ** power + .5)) + unit
-        if len(text) <= width:
-            return text
-    return str(int(size / 1024 ** 4 + .5)) + 'T'
+    if size < 1024:
+        return f'{size} B'
+    amount = size
+    units = ('B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB')
+    unit = 0
+    while amount >= 1024 and unit < len(units) - 1:
+        amount /= 1024
+        unit += 1
+    if round(amount, 1) >= 1024 and unit < len(units) - 1:
+        amount /= 1024
+        unit += 1
+    text = f'{amount:.1f} {units[unit]}'
+    return text if len(text) <= width else f'{amount:.0f} {units[unit]}'
